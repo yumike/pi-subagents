@@ -180,7 +180,24 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("applies the scopeModels allowlist to a caller-supplied model", async () => {
+  it("launches a nested child with the caller's model instead of the definition default", async () => {
+    writeAgent("scout", "model: anthropic/allowed\n");
+    const [agent] = tools();
+
+    await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/blocked",
+    });
+
+    expect(spawnAndWait.mock.calls[0]?.[4]).toMatchObject({
+      model: { provider: "anthropic", id: "blocked" },
+    });
+  });
+
+  it.each(["", "model: anthropic/allowed\n"])("checks the caller's model scope with agent defaults %j", async (frontmatter) => {
+    writeAgent("scout", frontmatter);
     writeFileSync(
       join(cwd, ".pi", "settings.json"),
       JSON.stringify({ enabledModels: ["anthropic/allowed"] }),

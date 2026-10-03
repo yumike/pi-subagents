@@ -1608,7 +1608,7 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Per-call model override for new spawns, taking precedence over the agent definition. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent definition\'s model, then the parent model.',
         }),
       ),
       thinking: Type.Optional(
@@ -1807,7 +1807,7 @@ Terse command-style prompts produce shallow, generic work.
         defaultRunInBackground: getBackgroundByDefault(),
       });
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // Model precedence: caller, then agent definition, then parent.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
@@ -1856,26 +1856,13 @@ Terse command-style prompts produce shallow, generic work.
       // This is the pre-session snapshot — agent-manager overwrites it with the
       // effective values the moment a session reports them.
       const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
-      // What the caller SPELLED, kept only if it names a different model than the
-      // one that won. Model input is fuzzy — `"haiku"` and
-      // `"anthropic/claude-haiku-4-5"` are the same model — so comparing the two
-      // strings would disclose an override that never happened. A spelling that
-      // resolves to nothing is still worth disclosing: it cannot have taken effect.
-      const askedModel = ((asked: string | undefined) => {
-        if (!asked) return undefined;
-        const resolvedAsked = resolveModel(asked, ctx.modelRegistry);
-        if (typeof resolvedAsked === "string") return asked;
-        return resolvedAsked.provider === model?.provider && resolvedAsked.id === model?.id ? undefined : asked;
-      })(resolvedConfig.overridden?.model);
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
         modelId,
         thinking,
-        // Only set where the agent file outranked the caller, so the surfaces can
-        // disclose a parameter that was accepted but could not take effect (#182).
+        // Disclose caller thinking overridden by the agent definition.
         requestedThinking: resolvedConfig.overridden?.thinking,
-        requestedModel: askedModel,
         // Explicit value only — the default fallback would just add noise.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
