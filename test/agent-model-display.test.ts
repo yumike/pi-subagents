@@ -66,6 +66,7 @@ function session(provider: string, id: string, thinkingLevel: string, name?: str
 const MODELS = [
   { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus 4.6" },
   { provider: "anthropic", id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+  { provider: "zai", id: "glm-5.3", name: "GLM 5.3" },
 ];
 
 const MODEL_NAMES: Record<string, string> = Object.fromEntries(MODELS.map(m => [m.id, m.name]));
@@ -121,6 +122,24 @@ afterEach(() => {
 });
 
 describe("Agent tool result — effective model", () => {
+  it("lets Explore inherit a non-Anthropic parent even when Haiku is available", async () => {
+    const context = ctx();
+    context.model = MODELS[2];
+    const tool = agentTool();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
+
+    const result = await tool.execute(
+      "tc-explore",
+      { prompt: "find files", description: "explore", subagent_type: "Explore", run_in_background: true },
+      undefined,
+      undefined,
+      context,
+    );
+
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ model: MODELS[2] });
+    expect(result.details.modelName).toBe("glm 5.3");
+  });
+
   it("names the model even when the child inherited the parent's", async () => {
     // The old rule was "show it only when it differs from the parent", which
     // left `thinking: high` attached to nothing on the common path.
