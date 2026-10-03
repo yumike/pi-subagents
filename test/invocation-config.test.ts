@@ -19,7 +19,7 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 }
 
 describe("resolveAgentInvocationConfig", () => {
-  it("lets the caller choose a model while keeping other config fields locked", () => {
+  it("prefers agent config over tool-call params for locked fields", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         model: "provider/config-model",
@@ -41,8 +41,8 @@ describe("resolveAgentInvocationConfig", () => {
       },
     );
 
-    expect(resolved.modelInput).toBe("provider/param-model");
-    expect(resolved.modelFromParams).toBe(true);
+    expect(resolved.modelInput).toBe("provider/config-model");
+    expect(resolved.modelFromParams).toBe(false);
     expect(resolved.thinking).toBe("high");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
@@ -70,20 +70,6 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
-  });
-
-  it("uses the agent model as a default when the caller omits it", () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ model: "provider/config-model" }), {});
-
-    expect(resolved.modelInput).toBe("provider/config-model");
-    expect(resolved.modelFromParams).toBe(false);
-  });
-
-  it("leaves model selection to the parent when neither source specifies one", () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig(), {});
-
-    expect(resolved.modelInput).toBeUndefined();
-    expect(resolved.modelFromParams).toBe(false);
   });
 
   it("lets parent fill in booleans when config leaves them undefined", () => {
@@ -164,13 +150,13 @@ describe("resolveJoinMode", () => {
 });
 
 describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
-  it("records overridden thinking but honors the caller's model", () => {
+  it("records the caller's values when the agent file outranks them", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({ model: "provider/config-model", thinking: "low" }),
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max" });
+    expect(resolved.overridden).toEqual({ thinking: "max", model: "provider/param-model" });
   });
 
   it("records nothing when the caller got what they asked for", () => {
@@ -196,12 +182,12 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
     ).overridden).toBeUndefined();
   });
 
-  it("records overridden thinking when the model comes only from the caller", () => {
+  it("records each field independently", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({ thinking: "low" }),
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max" });
+    expect(resolved.overridden).toEqual({ thinking: "max", model: undefined });
   });
 });

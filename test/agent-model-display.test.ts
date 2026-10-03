@@ -20,7 +20,6 @@ vi.mock("../src/agent-runner.js", async () => {
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
-import { setScopeModelsEnabled } from "../src/model-scope.js";
 
 function agentTool() {
   const tools = new Map<string, any>();
@@ -118,7 +117,6 @@ afterEach(() => {
   if (originalHome == null) delete process.env.HOME;
   else process.env.HOME = originalHome;
   registerAgents(new Map());
-  setScopeModelsEnabled(false);
   rmSync(cwd, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -140,26 +138,6 @@ describe("Agent tool result — effective model", () => {
 
     expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ model: MODELS[2] });
     expect(result.details.modelName).toBe("glm 5.3");
-  });
-
-  it.each([
-    ["anthropic/claude-haiku-4-5", "haiku 4.5", 1],
-    ["unavailable/model", "opus 4.6", 0],
-  ])("uses definition default %s or inherits when unavailable", async (configured, label, modelIndex) => {
-    pinnedAgent(`model: ${configured}\n`);
-    const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
-
-    const result = await tool.execute(
-      "tc-default",
-      { prompt: "go", description: "d", subagent_type: "pinned", run_in_background: true },
-      undefined,
-      undefined,
-      ctx(),
-    );
-
-    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ model: MODELS[modelIndex] });
-    expect(result.details.modelName).toBe(label);
   });
 
   it("names the model even when the child inherited the parent's", async () => {
@@ -273,7 +251,7 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.tags).toContain("thinking: low (asked max)");
   });
 
-  it("uses and displays the caller's model instead of the agent default", async () => {
+  it("discloses a model an agent file pinned over the caller's (#182)", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
@@ -292,11 +270,13 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ model: MODELS[0] });
-    expect(result.details.modelName).toBe("opus 4.6");
+    expect(result.details.modelName).toBe("haiku 4.5 (asked anthropic/claude-opus-4-6)");
   });
 
-  it("resolves a fuzzy caller model without reporting an override", async () => {
+  it("stays quiet when the caller's spelling names the model that won", async () => {
+    // Model input is fuzzy: `"haiku"` and `"anthropic/claude-haiku-4-5"` are the
+    // same model, and the frontmatter did not take anything away from the
+    // caller. Comparing the raw strings would print "haiku 4.5 (asked haiku)".
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
@@ -312,10 +292,10 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.modelName).toBe("haiku 4.5");
   });
 
-  it("rejects an unavailable caller model instead of using the agent default", async () => {
+  it("discloses a spelling that names no available model at all", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
 
     const result = await tool.execute(
       "tc-5c",
@@ -325,31 +305,7 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.content[0].text).toContain('Model not found: "gpt-9"');
-    expect(runAgent).not.toHaveBeenCalled();
-  });
-
-  it("refuses an out-of-scope caller model even when the agent has an allowed default", async () => {
-    pinnedAgent("model: anthropic/claude-haiku-4-5\n");
-    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
-      enabledModels: ["anthropic/claude-haiku-4-5"],
-    }));
-    const tool = agentTool();
-    setScopeModelsEnabled(true);
-    vi.mocked(runAgent).mockClear();
-    const context = ctx();
-    context.cwd = cwd;
-
-    const result = await tool.execute(
-      "tc-scope",
-      { prompt: "go", description: "d", subagent_type: "pinned", model: "zai/glm-5.3", run_in_background: true },
-      undefined,
-      undefined,
-      context,
-    );
-
-    expect(result.content[0].text).toContain('Model not in scope: "zai/glm-5.3"');
-    expect(runAgent).not.toHaveBeenCalled();
+    expect(result.details.modelName).toBe("haiku 4.5 (asked gpt-9)");
   });
 
   it("says nothing about a request that was honored", async () => {
