@@ -1608,7 +1608,7 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override for new subagents. Accepts "provider/modelId" or a fuzzy model name. Overrides the agent definition\'s default. If omitted, uses that default or inherits the parent model.',
+            'Optional model override. Accepts "provider/modelId" or fuzzy name. Takes precedence over the agent definition. Omit to use the agent type\'s default, then the parent model.',
         }),
       ),
       thinking: Type.Optional(
