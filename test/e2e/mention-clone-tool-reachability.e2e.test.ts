@@ -1,97 +1,110 @@
-/**
- * mention-clone-tool-reachability.e2e.test.ts — reachability guard for the one
- * tool the mention clone is built around.
- *
- * `runMentionClone` hands a session ONE tool and expects the model to call it.
- * Whether that tool ever reaches the model is decided entirely inside Pi, by
- * `createAgentSession`'s allowlist plumbing — and the unit tests cannot see it:
- * their `createAgentSession` is a mock that hands `customTools[0]` straight to
- * the model turn, so a session option that silently strips the tool passes
- * every one of them.
- *
- * That is not hypothetical. The clone shipped with `noTools: "all"` on the
- * reading its doc comment invites ("start with no tools enabled" — no
- * built-ins, keep mine). Pi turns that flag into an EMPTY allowlist, and an
- * empty array is truthy, so `AgentSession` builds an empty `Set` and
- * `isAllowedTool` rejects every name — custom tools are filtered by the same
- * predicate as built-ins. Every mention was prompted with no tools, answered in
- * prose, and fell back to a direct start with a warning. The unit suite stayed
- * green throughout.
- *
- * So this asserts against a REAL session, on the two things a mock cannot
- * establish:
- *   1. the clone's `Agent` tool is actually active on it, and
- *   2. nothing else is — the invisible turn cannot read, write or run anything.
- *
- * No network/LLM: a faux provider satisfies session construction, and the
- * assertion is on the constructed tool set rather than on a model turn.
- */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getCurrentSystemPrompt, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { type ExtensionContext, type ExtensionToolContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// Real pi-mono session construction; a cold first run under full-suite CPU
-// contention can exceed vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
-
-// Hoisted so the (lifted) mock factory can reach it. Everything except the
-// capture is the real module — the point is to construct a REAL session.
-const { sessions } = vi.hoisted(() => ({ sessions: [] as any[] }));
-
-vi.mock("@earendil-works/pi-coding-agent", async () => {
-  const actual = await vi.importActual<any>("@earendil-works/pi-coding-agent");
-  return {
-    ...actual,
-    createAgentSession: async (opts: any) => {
-      const created = await actual.createAgentSession(opts);
-      sessions.push(created.session);
-      return created;
-    },
-  };
-});
-
 import { runMentionClone } from "../../src/mention-clone.js";
 import { fauxModelBackend } from "../helpers/faux-model-backend.js";
 import { registerFauxProvider } from "../helpers/pi-ai.js";
 
-describe("mention clone tool reachability against real pi-mono", () => {
+vi.setConfig({ testTimeout: 30_000 });
+
+describe("mention cloning against real Pi", () => {
   let cwd: string;
   let faux: ReturnType<typeof registerFauxProvider>;
+  let parent: SessionManager;
+  let requests: TranscriptContext[];
+  let spawnedContext: ExtensionToolContext | undefined;
 
   beforeEach(() => {
-    sessions.length = 0;
     cwd = mkdtempSync(join(tmpdir(), "subagents-mention-clone-"));
+    parent = SessionManager.inMemory(cwd);
+    requests = [];
+    spawnedContext = undefined;
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    faux.setResponses([
+      (context) => {
+        requests.push(structuredClone(context));
+        return fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "Explore", prompt: "Investigate the earlier task" }));
+      },
+      fauxAssistantMessage("Started."),
+    ]);
   });
+
   afterEach(() => {
     faux.unregister();
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("the clone's Agent tool is live on the real session, and it is the only one", async () => {
+  async function delegate() {
     const model = faux.getModel();
     const backend = fauxModelBackend(model);
-    const ctx: any = {
+    const ctx = {
       cwd,
       model,
-      getSystemPrompt: () => "PARENT",
-      // mention-clone reads the runtime off the registry facade, the same shim
-      // agent-runner carries for Pi >= 0.80.8.
+      thinkingLevel: "off",
+      getSystemPrompt: () => "Live parent instructions",
       modelRegistry: { ...backend.modelRegistry, runtime: backend.modelRuntime },
-      sessionManager: { getEntries: () => [], getLeafId: () => undefined },
+      sessionManager: parent,
+    } as unknown as ExtensionContext;
+    const agentTool: ToolDefinition = {
+      name: "Agent",
+      label: "Agent",
+      description: "Start an agent",
+      parameters: Type.Object({ subagent_type: Type.String(), prompt: Type.String() }),
+      execute: async (_id, _params, _signal, _onUpdate, toolContext) => {
+        spawnedContext = toolContext;
+        return { content: [{ type: "text", text: "Agent ID: child" }], details: undefined };
+      },
     };
+    return runMentionClone({ ctx, type: "Explore", message: "Investigate it", agentTool });
+  }
 
-    // Never called: the assertion is on what the session exposes, not on the
-    // faux model deciding to use it.
-    const agentTool = { name: "Agent", execute: vi.fn() } as any;
+  it("uses the live parent prompt and history with only the Agent tool", async () => {
+    parent.appendMessage({
+      role: "system", content: "Stale parent instructions", timestamp: 1,
+      toolsAdded: [{ name: "write", description: "Write a file", parameters: Type.Object({}) }],
+    });
+    parent.appendMessage({ role: "user", content: "Earlier task", timestamp: 2 });
+    parent.appendMessage(fauxAssistantMessage("Earlier answer"));
+    const originalEntries = structuredClone(parent.getEntries());
 
-    // Never rejects by contract; a faux turn that cannot complete is fine,
-    // because the tool set is fixed at construction.
-    await runMentionClone({ ctx, type: "Explore", message: "go", agentTool });
+    expect(await delegate()).toEqual({ spawned: true });
 
-    expect(sessions).toHaveLength(1);
-    // The bug this file exists for: with an empty allowlist this is `[]`.
-    expect(sessions[0].getActiveToolNames()).toEqual(["Agent"]);
+    expect(requests).toHaveLength(1);
+    expect(getCurrentSystemPrompt(requests[0].messages)).toBe("Live parent instructions");
+    expect(getCurrentTools(requests[0].messages).map(tool => tool.name)).toEqual(["Agent"]);
+    expect(JSON.stringify(requests[0].messages)).toContain("Earlier task");
+    expect(JSON.stringify(requests[0].messages)).toContain("Earlier answer");
+    expect(spawnedContext?.sessionManager).toBe(parent);
+    expect(spawnedContext?.tools.map(tool => tool.name)).toEqual(["Agent"]);
+    expect(structuredClone(parent.getEntries())).toEqual(originalEntries);
+  });
+
+  it("preserves compaction and edits on the active branch without abandoned messages", async () => {
+    parent.appendMessage({ role: "user", content: "Obsolete task", timestamp: 1 });
+    const retained = parent.appendMessage({ role: "user", content: "Unedited task", timestamp: 2 });
+    parent.appendCompaction("Earlier work summary", retained, 10_000);
+    parent.appendContextEdit(retained, { content: "Edited task" });
+    const active = parent.appendMessage({ role: "user", content: "Active branch task", timestamp: 3 });
+    parent.appendMessage({ role: "user", content: "Abandoned branch", timestamp: 4 });
+    parent.branch(active);
+    const originalEntries = structuredClone(parent.getEntries());
+    const originalLeaf = parent.getLeafId();
+
+    expect(await delegate()).toEqual({ spawned: true });
+
+    const transcript = JSON.stringify(requests[0].messages);
+    expect(transcript).toContain("Earlier work summary");
+    expect(transcript).toContain("Edited task");
+    expect(transcript).toContain("Active branch task");
+    expect(transcript).not.toContain("Obsolete task");
+    expect(transcript).not.toContain("Unedited task");
+    expect(transcript).not.toContain("Abandoned branch");
+    expect(parent.getEntries()).toEqual(originalEntries);
+    expect(parent.getLeafId()).toBe(originalLeaf);
   });
 });
