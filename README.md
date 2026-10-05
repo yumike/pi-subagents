@@ -49,7 +49,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **1.0.0 or newer**. Development dependencies pin Pi 1.0.0; CI checks both that baseline and the latest Pi release. Upgrade Pi before using this fork on a 0.x installation. Host packages remain wildcard peer dependencies so Pi supplies its own copies.
+Requires pi **1.0.0 or newer**. Development dependencies pin Pi 1.0.0 as the tested baseline; host `peerDependencies` remain `*`, so npm does not enforce that minimum. CI checks both that baseline and the latest Pi release.
 
 ### Other hosts
 
@@ -642,7 +642,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 
 **Report usage to session** (`reportUsage`, default `false`): whether subagent spend is added to *this* session's own totals. Subagents run in their own pi sessions, so by default pi's footer, statusline and `/cost` count only what the main model spent — a session that delegated most of its work reads as nearly free. Turn it on and each `Agent` / `get_subagent_result` / `steer_subagent` result carries the spend accumulated since the last one, which pi folds into `getSessionStats()`; `/cost` attributes it to the **Tools/summaries** bucket. Toggle via `/agents → Settings → Report usage to session`; applied live.
 
-Three things worth knowing about the numbers. Every token component is reported, `cacheRead` included — the cached prefix genuinely is re-read and re-billed on every call, and pi counts it the same way for the session's own messages, so withholding it would make a subagent's rows count differently from every other row in one total. (The extension's *own* token displays still leave it out, which is a different question: there it inflates a reading of how much work was done.) Cost is pi's own per-message figure, priced from the model's listed rates; a model pi has no rates for contributes zero rather than an estimate. Reported child usage does not inflate the parent's context-window percentage; the parent's own transcript, including tool-result text, still contributes to its context. Agents that finish in the background have no tool result of their own to ride on, so their spend is carried by the next one you make — the footer catches up on the following call, not the moment they finish.
+Three things worth knowing about the numbers. Every token component is reported, `cacheRead` included — the cached prefix genuinely is re-read and re-billed on every call, and pi counts it the same way for the session's own messages, so withholding it would make a subagent's rows count differently from every other row in one total. (The extension's *own* token displays still leave it out, which is a different question: there it inflates a reading of how much work was done.) Cost is pi's own per-message figure, priced from the model's listed rates; a model pi has no rates for contributes zero rather than an estimate. Reported child usage does not inflate the parent's context-window percentage; actual returned tool-result text does consume parent context. Agents that finish in the background have no tool result of their own to ride on, so their spend is carried by the next one you make — the footer catches up on the following call, not the moment they finish.
 
 **Show cost** (`showCost`, default `false`): whether the subagent surfaces print an estimated cost beside their token counts — the widget (running *and* finished lines), [FleetView](#fleetview), the conversation viewer, foreground results, `get_subagent_result`, and completion notifications:
 

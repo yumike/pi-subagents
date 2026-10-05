@@ -20,19 +20,13 @@
  * `sessionManager.appendMessage`, because what is under test is the accounting,
  * not the streaming that would normally produce the message.
  *
- * This test is also what set the peer floor. Pi began folding `toolResult.usage`
- * into `getSessionStats()` in 0.81.0, when the computation moved to walking
- * session entries through `addUsageToTotals`; every 0.80.x sums assistant
- * messages alone and drops the field. Running unconditionally is the point —
- * against a Pi that does not aggregate, this fails rather than skipping, which
- * is how the range stays honest. `peerDependencies` moved to `>=0.81.0` for
- * exactly this reason, so the CI floor job runs it too. The floor has since moved
- * on past it (the Workflow tool needs 0.84.0), so this no longer pins the range's
- * lower edge — it still pins the behaviour that made 0.80.x unsupportable.
+ * This regression runs unconditionally to ensure reported child usage
+ * contributes to parent token and cost totals.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PendingUsagePool } from "../../src/usage.js";
@@ -63,16 +57,16 @@ describe("subagent usage reaches the parent session's stats (real pi)", () => {
     const { session } = await createAgentSession({
       cwd,
       sessionManager: SessionManager.inMemory(cwd),
-      model: model as any,
+      model,
       modelRegistry: backend.modelRegistry,
       modelRuntime: backend.modelRuntime,
       tools: [],
-    } as any);
+    } as Parameters<typeof createAgentSession>[0]);
     return session;
   }
 
   /** The tool result our `Agent` tool returns, as pi would persist it. */
-  function toolResultCarrying(usage: unknown) {
+  function toolResultCarrying(usage: ToolResultMessage["usage"]): ToolResultMessage {
     return {
       role: "toolResult" as const,
       toolCallId: "tc-1",
@@ -94,7 +88,7 @@ describe("subagent usage reaches the parent session's stats (real pi)", () => {
       pool.add({ input: 2000, output: 600, cacheWrite: 200, cacheRead: 18_000, cost: 0.0077 });
       const usage = pool.drain();
 
-      session.sessionManager.appendMessage(toolResultCarrying(usage) as any);
+      session.sessionManager.appendMessage(toolResultCarrying(usage));
       const after = session.getSessionStats();
 
       // Exactly what we reported, on every component pi tracks — cacheRead
@@ -114,25 +108,24 @@ describe("subagent usage reaches the parent session's stats (real pi)", () => {
     }
   });
 
-  it("does not count subagent usage toward the context-window percentage", async () => {
-    // Pi 1 estimates context from the persisted transcript, including tool-result
-    // text. Compare identical transcripts with and without usage: only the
-    // child's reported spend must be excluded, not the text the parent receives.
+  it("leaves the context-window percentage alone", async () => {
+    // Returned text consumes parent context; reported child usage must not.
+    // Compare identical nonempty transcripts, differing only in reported usage.
     const session = await realSession();
-    const control = await realSession();
+    const baseline = await realSession();
     try {
-      control.sessionManager.appendMessage(toolResultCarrying(undefined) as any);
-      const baseline = control.getSessionStats().contextUsage?.percent;
-      expect(baseline).toBeGreaterThan(0);
+      baseline.sessionManager.appendMessage(toolResultCarrying(undefined));
+      const before = baseline.getSessionStats().contextUsage?.percent ?? null;
+      expect(before).toBeGreaterThan(0);
 
       const pool = new PendingUsagePool();
       pool.add({ input: 150_000, output: 400, cacheWrite: 100, cost: 1.5 });
-      session.sessionManager.appendMessage(toolResultCarrying(pool.drain()) as any);
+      session.sessionManager.appendMessage(toolResultCarrying(pool.drain()));
 
-      expect(session.getSessionStats().contextUsage?.percent).toBe(baseline);
+      expect(session.getSessionStats().contextUsage?.percent ?? null).toBe(before);
     } finally {
       session.dispose?.();
-      control.dispose?.();
+      baseline.dispose?.();
     }
   });
 
@@ -141,7 +134,7 @@ describe("subagent usage reaches the parent session's stats (real pi)", () => {
     const session = await realSession();
     try {
       const before = session.getSessionStats();
-      session.sessionManager.appendMessage(toolResultCarrying(undefined) as any);
+      session.sessionManager.appendMessage(toolResultCarrying(undefined));
       const after = session.getSessionStats();
 
       expect(after.tokens.input).toBe(before.tokens.input);

@@ -21,6 +21,10 @@ jobs:
       - run: npm run test
       - run: npm run build
 
+  # Forward canary: reinstall whatever Pi is `latest` over the pin, so a release newer than
+  # the baseline surfaces here before it reaches users. It runs the full typecheck + suite,
+  # not a hand-picked file list, so new drift can't hide in a test nobody remembered to add
+  # here. Both steps pass as of the 1.0.0 baseline — a failure IS fresh breakage.
   compat-latest-pi:
     runs-on: ubuntu-latest
     steps:
