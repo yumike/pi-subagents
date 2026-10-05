@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { type ExtensionContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -56,7 +56,7 @@ describe("mention clone tool reachability against real pi-mono", () => {
       modelRegistry: { ...backend.modelRegistry, runtime: backend.modelRuntime },
       sessionManager: parent,
     } as unknown as ExtensionContext;
-    const requests: Context[] = [];
+    const requests: TranscriptContext[] = [];
     faux.setResponses([
       request => {
         requests.push({ ...request, messages: structuredClone(request.messages) });
@@ -81,8 +81,8 @@ describe("mention clone tool reachability against real pi-mono", () => {
     expect(result).toEqual({ spawned: true });
     expect(requests).toHaveLength(1);
     const request = requests[0];
-    expect(request.systemPrompt).toBe("Live parent instructions");
-    expect(request.tools?.map(tool => tool.name)).toEqual(["Agent"]);
+    expect(getCurrentSystemPrompt(request.messages)).toBe("Live parent instructions");
+    expect(getCurrentTools(request.messages).map(tool => tool.name)).toEqual(["Agent"]);
     expect(executions).toHaveLength(1);
     const toolCtx = executions[0];
     expect(toolCtx.cwd).toBe(cwd);
