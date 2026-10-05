@@ -16,7 +16,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context, ToolCall } from "@earendil-works/pi-ai";
+import { getCurrentTools, type ToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -31,7 +31,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const NESTED_TOOLS = ["Agent", "get_subagent_result", "steer_subagent"];
 
-function userPrompt(ctx: Context): string {
+function userPrompt(ctx: TranscriptContext): string {
   for (const message of ctx.messages) {
     if (message.role !== "user") continue;
     const content = (message as { content?: unknown }).content;
@@ -46,11 +46,11 @@ function userPrompt(ctx: Context): string {
   return "";
 }
 
-function tools(ctx: Context): string[] {
-  return (ctx.tools ?? []).map((tool) => tool.name);
+function tools(ctx: TranscriptContext): string[] {
+  return getCurrentTools(ctx.messages).map((tool) => tool.name);
 }
 
-function toolResults(ctx: Context, name: string): string[] {
+function toolResults(ctx: TranscriptContext, name: string): string[] {
   return ctx.messages.flatMap((message) => {
     if (
       message.role !== "toolResult" ||
@@ -99,7 +99,7 @@ async function waitForChildReady(
   }
 }
 
-function lastToolResult(ctx: Context, name: string): string {
+function lastToolResult(ctx: TranscriptContext, name: string): string {
   const results = toolResults(ctx, name);
   return results[results.length - 1] ?? "";
 }
