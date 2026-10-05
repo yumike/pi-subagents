@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getCurrentSystemPrompt, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
@@ -21,6 +21,7 @@ describe("mention cloning against real Pi", () => {
 
   beforeEach(() => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-mention-clone-"));
+    writeFileSync(join(cwd, "AGENTS.md"), "Discovered context must not duplicate live instructions");
     parent = SessionManager.inMemory(cwd);
     requests = [];
     spawnedContext = undefined;
@@ -89,22 +90,29 @@ describe("mention cloning against real Pi", () => {
     const retained = parent.appendMessage({ role: "user", content: "Unedited task", timestamp: 2 });
     parent.appendCompaction("Earlier work summary", retained, 10_000);
     parent.appendContextEdit(retained, { content: "Edited task" });
-    const active = parent.appendMessage({ role: "user", content: "Active branch task", timestamp: 3 });
-    parent.appendMessage({ role: "user", content: "Abandoned branch", timestamp: 4 });
+    const branchPoint = parent.getLeafId()!;
+    parent.appendMessage({ role: "user", content: "Abandoned branch", timestamp: 3 });
+    parent.branchWithSummary(branchPoint, "Branch summary");
+    // Valid persistable data that structuredClone cannot copy.
+    parent.appendCustomEntry("mention-test", { toJSON() { return { marker: "CUSTOM" }; } });
+    const active = parent.appendMessage({ role: "user", content: "Active branch task", timestamp: 4 });
+    parent.appendMessage({ role: "user", content: "After active leaf", timestamp: 5 });
     parent.branch(active);
-    const originalEntries = structuredClone(parent.getEntries());
+    const originalEntries = JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() });
     const originalLeaf = parent.getLeafId();
 
     expect(await delegate()).toEqual({ spawned: true });
 
     const transcript = JSON.stringify(requests[0].messages);
     expect(transcript).toContain("Earlier work summary");
+    expect(transcript).toContain("Branch summary");
     expect(transcript).toContain("Edited task");
     expect(transcript).toContain("Active branch task");
     expect(transcript).not.toContain("Obsolete task");
     expect(transcript).not.toContain("Unedited task");
     expect(transcript).not.toContain("Abandoned branch");
-    expect(parent.getEntries()).toEqual(originalEntries);
+    expect(transcript).not.toContain("After active leaf");
+    expect(JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() })).toBe(originalEntries);
     expect(parent.getLeafId()).toBe(originalLeaf);
   });
 });
