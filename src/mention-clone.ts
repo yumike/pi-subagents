@@ -127,9 +127,7 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
 
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
-    // Pi 0.80.8 moved createAgentSession from modelRegistry to modelRuntime;
-    // agent-runner.ts carries the same shim for the same reason — pass both so
-    // the clone keeps the parent's providers across the supported range.
+    // Reuse the parent's runtime to preserve its providers and credentials.
     const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
     // Copy only the active path, without the parent's session header.
     // Match persistence semantics, including custom metadata with toJSON methods.
