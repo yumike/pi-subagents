@@ -11,6 +11,9 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
@@ -57,6 +60,7 @@ const TOOL_SCOPE_PATH = `<inline:${TOOL_SCOPE_EXTENSION}>`;
  * single-file extensions to the basename minus `.ts`/`.js`.
  */
 export function extensionCanonicalName(extPath: string): string {
+  if (extPath.startsWith("builtin:")) return extPath.slice("builtin:".length).toLowerCase();
   const base = basename(extPath);
   const name = base === "index.ts" || base === "index.js"
     ? basename(dirname(extPath))
@@ -122,7 +126,7 @@ function extensionPackageName(extPath: string): string | undefined {
  */
 export function extensionCanonicalNames(extPath: string): string[] {
   const canonical = extensionCanonicalName(extPath);
-  const pkg = extensionPackageName(extPath);
+  const pkg = extPath.startsWith("builtin:") ? undefined : extensionPackageName(extPath);
   return pkg && pkg !== canonical ? [canonical, pkg] : [canonical];
 }
 
@@ -711,6 +715,7 @@ export async function runAgent(
   // It's only needed when we're neither loading everything without excludes
   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
+  const separateConfigDir = resolve(configCwd) !== resolve(effectiveCwd);
   const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
@@ -737,11 +742,17 @@ export async function runAgent(
     cwd: configCwd,
     agentDir,
     noExtensions,
-    extensionFactories: !noExtensions ? [{
-      name: TOOL_SCOPE_EXTENSION,
-      hidden: true,
-      factory: (pi: ExtensionAPI) => { pi.on("tool_call", event => toolCallScope?.(event)); },
-    }] : [],
+    extensionFactories: [
+      { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
+      { name: "tool-search", factory: createToolSearchExtension(), builtin: true, replaceable: true },
+      // MCP reads config from its execution cwd; never discover the target's config.
+      ...(!separateConfigDir ? [{ name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true }] : []),
+      ...(!noExtensions ? [{
+        name: TOOL_SCOPE_EXTENSION,
+        hidden: true,
+        factory: (pi: ExtensionAPI) => { pi.on("tool_call", event => toolCallScope?.(event)); },
+      }] : []),
+    ],
     additionalExtensionPaths,
     extensionsOverride,
     noSkills,
@@ -752,6 +763,13 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await runInChildSessionContext(() => loader.reload());
+
+  if (separateConfigDir && !noExtensions && !excludeNames.has("mcp") && (loadAll || keepNames.has("mcp"))) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `extension-error:native MCP is unavailable for agent "${type}" with a separate config directory; target mcp.json was not loaded`,
+    });
+  }
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -790,6 +808,7 @@ export async function runAgent(
   // flags path-like and "*" entries — excludes are plain names only.
   if (hasExcludes && discoveredNames) {
     for (const name of excludeNames) {
+      if (separateConfigDir && name === "mcp") continue;
       if (!discoveredNames.has(name)) {
         options.onToolActivity?.({
           type: "end",
@@ -1005,7 +1024,7 @@ export async function runAgent(
     options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
   );
 
-  // session_start lets extensions initialize and register late tools.
+  // session_start connects MCP servers and lets extensions register late tools.
   await session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({

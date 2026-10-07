@@ -35,6 +35,9 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  createCodemodeExtension: () => () => {},
+  createMcpExtension: () => () => {},
+  createToolSearchExtension: () => () => {},
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
   defineTool: (definition: unknown) => definition,
@@ -57,7 +60,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
         return;
       }
       for (const entry of this.opts.extensionFactories ?? []) {
-        entry.factory({
+        if (!entry.builtin) entry.factory({
           on: (event: string, handler: (event: { toolName: string }) => unknown) => {
             if (event === "tool_call") toolCallHandlers.push(handler);
           },
