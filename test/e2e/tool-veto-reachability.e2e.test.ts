@@ -30,7 +30,7 @@ describe("tool scope through Pi's real execution pipeline", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  async function run() {
+  async function run(activateDeferred = false) {
     const calls = join(cwd, "calls");
     writeFileSync(calls, "");
     const targets = join(cwd, "targets.mjs");
@@ -38,17 +38,21 @@ describe("tool scope through Pi's real execution pipeline", () => {
       import { appendFileSync } from 'node:fs';
       export default function(pi) {
         pi.on('before_agent_start', () => {
-          for (const [name, exposure] of [
+          for (const [name, exposure, defaultActive] of [
             ['allowed_late', 'deferred'], ['blocked_late', 'deferred'],
             ['allowed_code', 'codemode'], ['blocked_code', 'codemode'],
-            ['blocked_direct', 'direct'], ['permission_denied', 'deferred']
-          ]) pi.registerTool({ name, label: name, description: name, exposure,
+            ['blocked_direct', 'direct'], ['permission_denied', 'deferred'],
+            ['inactive_direct', 'direct', false]
+          ]) pi.registerTool({ name, label: name, description: name, exposure, defaultActive,
             parameters: { type: 'object', properties: {} },
             execute: async () => {
               appendFileSync(${JSON.stringify(calls)}, name + '\\n');
               return { content: [{ type: 'text', text: name }], details: undefined };
             }
           });
+        });
+        pi.on('before_agent_start', () => {
+          if (${activateDeferred}) pi.setActiveTools([...pi.getActiveTools(), 'allowed_late']);
         });
         pi.on('tool_call', event => {
           if (event.toolName === 'permission_denied') return { block: true, reason: 'permission gate' };
@@ -74,7 +78,7 @@ describe("tool scope through Pi's real execution pipeline", () => {
     registerAgents(new Map([["scope", {
       name: "scope", description: "scope", builtinToolNames: [],
       extensions: [targets, bridge], skills: false, persistSession: false,
-      extSelectors: ["ext:bridge.mjs", "ext:targets.mjs/allowed_late", "ext:targets.mjs/allowed_code", "ext:targets.mjs/permission_denied"],
+      extSelectors: ["ext:bridge.mjs", "ext:targets.mjs/allowed_late", "ext:targets.mjs/allowed_code", "ext:targets.mjs/permission_denied", "ext:targets.mjs/inactive_direct"],
       systemPrompt: "Test tools.", promptMode: "replace", inheritContext: false, runInBackground: false, isolated: false,
     }]]));
     faux.setResponses([
@@ -105,9 +109,16 @@ describe("tool scope through Pi's real execution pipeline", () => {
     expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["allowed_late", "allowed_code", "allowed_late", "allowed_code"]);
   });
 
-  it("does not promote allowed deferred or codemode tools into direct declarations", async () => {
+  it("does not promote allowed indirect or default-inactive tools into direct declarations", async () => {
     const { session } = await run();
     expect(session.getActiveToolNames()).toEqual(["bridge"]);
-    expect(session.getAllTools().map(t => t.name)).toEqual(expect.arrayContaining(["allowed_late", "allowed_code"]));
+    expect(session.getAllTools().map(t => t.name)).toEqual(expect.arrayContaining(["allowed_late", "allowed_code", "inactive_direct"]));
+  });
+
+  it("retains an already activated in-scope deferred tool", async () => {
+    const { session } = await run(true);
+    expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["bridge", "allowed_late"]));
+    expect(session.getActiveToolNames()).not.toContain("allowed_code");
+    expect(session.getActiveToolNames()).not.toContain("inactive_direct");
   });
 });
