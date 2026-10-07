@@ -1,10 +1,9 @@
-/** Real-session regression: the invisible mention turn sees only Agent and the parent's live context. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getCurrentSystemPrompt, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
-import { type ExtensionContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { type ExtensionContext, type ExtensionToolContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMentionClone } from "../../src/mention-clone.js";
@@ -13,89 +12,107 @@ import { registerFauxProvider } from "../helpers/pi-ai.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
-describe("mention clone tool reachability against real pi-mono", () => {
+describe("mention cloning against real Pi", () => {
   let cwd: string;
   let faux: ReturnType<typeof registerFauxProvider>;
+  let parent: SessionManager;
+  let requests: TranscriptContext[];
+  let spawnedContext: ExtensionToolContext | undefined;
 
   beforeEach(() => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-mention-clone-"));
     writeFileSync(join(cwd, "AGENTS.md"), "Discovered context must not duplicate live instructions");
+    parent = SessionManager.inMemory(cwd);
+    requests = [];
+    spawnedContext = undefined;
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    faux.setResponses([
+      (context) => {
+        requests.push(structuredClone(context));
+        return fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "Explore", prompt: "Investigate the earlier task" }));
+      },
+      fauxAssistantMessage("Started."),
+    ]);
   });
+
   afterEach(() => {
-    vi.restoreAllMocks();
     faux.unregister();
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  // Omitting history, seeding all entries, changing the prompt, hiding Agent, or
-  // forwarding the clone's attribution instead of the parent's must break this turn.
-  it("starts Agent with the live prompt and active history", async () => {
-    const parent = SessionManager.inMemory(cwd);
-    parent.appendMessage({ role: "user", content: "OBSOLETE-CONTENT", timestamp: 1 });
-    const retained = parent.appendMessage({ role: "user", content: "KEPT-AFTER-COMPACTION", timestamp: 2 });
-    parent.appendCompaction("COMPACTION-SUMMARY", retained, 1000);
-    const branchPoint = parent.getLeafId()!;
-    parent.appendMessage({ role: "user", content: "ABANDONED-CONTENT", timestamp: 3 });
-    parent.branchWithSummary(branchPoint, "BRANCH-SUMMARY");
-    // Valid persistable data that structuredClone cannot copy.
-    parent.appendCustomEntry("mention-test", { toJSON() { return { marker: "CUSTOM" }; } });
-    const active = parent.appendMessage({ role: "user", content: "RETAINED-ACTIVE-CONTENT", timestamp: 4 });
-    parent.appendMessage({ role: "user", content: "AFTER-ACTIVE-LEAF", timestamp: 5 });
-    parent.branch(active);
-    const originalLeaf = parent.getLeafId();
-    // Snapshot persisted data, which legitimately includes objects with toJSON methods.
-    const snapshot = JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() });
+  async function delegate() {
     const model = faux.getModel();
     const backend = fauxModelBackend(model);
     const ctx = {
       cwd,
       model,
-      thinkingLevel: "high",
+      thinkingLevel: "off",
       getSystemPrompt: () => "Live parent instructions",
       modelRegistry: { ...backend.modelRegistry, runtime: backend.modelRuntime },
       sessionManager: parent,
     } as unknown as ExtensionContext;
-    const requests: TranscriptContext[] = [];
-    faux.setResponses([
-      request => {
-        requests.push({ ...request, messages: structuredClone(request.messages) });
-        return fauxAssistantMessage(fauxToolCall("Agent", { prompt: "go" }));
-      },
-      fauxAssistantMessage("started"),
-    ]);
-    const executions: ExtensionContext[] = [];
     const agentTool: ToolDefinition = {
       name: "Agent",
       label: "Agent",
       description: "Start an agent",
-      parameters: Type.Object({ prompt: Type.String(), run_in_background: Type.Optional(Type.Boolean()) }),
-      execute: async (_id, _params, _signal, _onUpdate, toolCtx) => {
-        executions.push(toolCtx);
-        return { content: [{ type: "text", text: "started" }], details: undefined };
+      parameters: Type.Object({ subagent_type: Type.String(), prompt: Type.String() }),
+      execute: async (_id, _params, _signal, _onUpdate, toolContext) => {
+        spawnedContext = toolContext;
+        return { content: [{ type: "text", text: "Agent ID: child" }], details: undefined };
       },
     };
+    return runMentionClone({ ctx, type: "Explore", message: "Investigate it", agentTool });
+  }
 
-    const result = await runMentionClone({ ctx, type: "Explore", message: "go", agentTool });
+  it("uses the live parent prompt and history with only the Agent tool", async () => {
+    parent.appendMessage({
+      role: "system", content: "Stale parent instructions", timestamp: 1,
+      toolsAdded: [{ name: "write", description: "Write a file", parameters: Type.Object({}) }],
+    });
+    parent.appendMessage({ role: "user", content: "Earlier task", timestamp: 2 });
+    parent.appendMessage(fauxAssistantMessage("Earlier answer"));
+    const originalEntries = structuredClone(parent.getEntries());
 
-    expect(result).toEqual({ spawned: true });
+    expect(await delegate()).toEqual({ spawned: true });
+
     expect(requests).toHaveLength(1);
-    const request = requests[0];
-    expect(getCurrentSystemPrompt(request.messages)).toBe("Live parent instructions");
-    expect(getCurrentTools(request.messages).map(tool => tool.name)).toEqual(["Agent"]);
-    expect(executions).toHaveLength(1);
-    const toolCtx = executions[0];
-    expect(toolCtx.cwd).toBe(cwd);
-    expect(toolCtx.model).toBe(model);
-    expect(toolCtx.sessionManager.getSessionId()).toBe(parent.getSessionId());
-    const text = JSON.stringify(request.messages);
-    for (const included of ["COMPACTION-SUMMARY", "BRANCH-SUMMARY", "KEPT-AFTER-COMPACTION", "RETAINED-ACTIVE-CONTENT"]) {
-      expect(text).toContain(included);
-    }
-    for (const excluded of ["OBSOLETE-CONTENT", "ABANDONED-CONTENT", "AFTER-ACTIVE-LEAF"]) {
-      expect(text).not.toContain(excluded);
-    }
+    expect(getCurrentSystemPrompt(requests[0].messages)).toBe("Live parent instructions");
+    expect(getCurrentTools(requests[0].messages).map(tool => tool.name)).toEqual(["Agent"]);
+    expect(JSON.stringify(requests[0].messages)).toContain("Earlier task");
+    expect(JSON.stringify(requests[0].messages)).toContain("Earlier answer");
+    expect(spawnedContext?.sessionManager).toBe(parent);
+    expect(spawnedContext?.tools.map(tool => tool.name)).toEqual(["Agent"]);
+    expect(structuredClone(parent.getEntries())).toEqual(originalEntries);
+  });
+
+  it("preserves compaction and edits on the active branch without abandoned messages", async () => {
+    parent.appendMessage({ role: "user", content: "Obsolete task", timestamp: 1 });
+    const retained = parent.appendMessage({ role: "user", content: "Unedited task", timestamp: 2 });
+    parent.appendCompaction("Earlier work summary", retained, 10_000);
+    parent.appendContextEdit(retained, { content: "Edited task" });
+    const branchPoint = parent.getLeafId()!;
+    parent.appendMessage({ role: "user", content: "Abandoned branch", timestamp: 3 });
+    parent.branchWithSummary(branchPoint, "Branch summary");
+    // Valid persistable data that structuredClone cannot copy.
+    parent.appendCustomEntry("mention-test", { toJSON() { return { marker: "CUSTOM" }; } });
+    const active = parent.appendMessage({ role: "user", content: "Active branch task", timestamp: 4 });
+    parent.appendMessage({ role: "user", content: "After active leaf", timestamp: 5 });
+    parent.branch(active);
+    const originalEntries = JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() });
+    const originalLeaf = parent.getLeafId();
+
+    expect(await delegate()).toEqual({ spawned: true });
+
+    const transcript = JSON.stringify(requests[0].messages);
+    expect(transcript).toContain("Earlier work summary");
+    expect(transcript).toContain("Branch summary");
+    expect(transcript).toContain("Edited task");
+    expect(transcript).toContain("Active branch task");
+    expect(transcript).not.toContain("Obsolete task");
+    expect(transcript).not.toContain("Unedited task");
+    expect(transcript).not.toContain("Abandoned branch");
+    expect(transcript).not.toContain("After active leaf");
+    expect(JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() })).toBe(originalEntries);
     expect(parent.getLeafId()).toBe(originalLeaf);
-    expect(JSON.stringify({ header: parent.getHeader(), entries: parent.getEntries() })).toBe(snapshot);
   });
 });

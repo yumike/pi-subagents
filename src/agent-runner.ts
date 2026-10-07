@@ -17,6 +17,7 @@ import {
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
+  type ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -987,24 +988,14 @@ export async function runAgent(
         })
       : SessionManager.inMemory(effectiveCwd);
 
-  // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
-  // modelRuntime, but ExtensionContext still exposes only the registry facade.
-  // Pass both so the full supported Pi range retains the parent's providers.
-  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
-  const sessionOpts: Parameters<typeof createAgentSession>[0] & {
-    modelRegistry: ExtensionContext["modelRegistry"];
-    modelRuntime?: unknown;
-  } = {
+  // The context exposes only the registry facade; retain its providers and credentials.
+  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: ModelRuntime }).runtime;
+  const sessionOpts: Parameters<typeof createAgentSession>[0] = {
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
     settingsManager,
-    modelRegistry: ctx.modelRegistry,
-    // `as never` is what keeps this assignable across the supported Pi range:
-    // pre-0.80.8 the field exists only via the `modelRuntime?: unknown` shim
-    // above, while newer Pi types it as `ModelRuntime` — a shape an opaque
-    // `unknown` read off the private facade field can never satisfy.
-    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
+    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
     tools: sessionTools,
     customTools: [...nestedTools, ...structuredTools],

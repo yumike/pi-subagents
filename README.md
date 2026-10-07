@@ -49,7 +49,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **1.0.0 or newer**. Development dependencies pin Pi 1.0.0 as the tested baseline; host `peerDependencies` remain `*`, so npm does not enforce that minimum. CI also checks latest Pi as an advisory, non-blocking canary.
+Requires pi **1.0.0 or newer**. Development dependencies pin Pi 1.0.0 as the tested baseline; host `peerDependencies` remain `*`, so npm does not enforce that minimum. CI checks both that baseline and the latest Pi release.
 
 ### Other hosts
 
