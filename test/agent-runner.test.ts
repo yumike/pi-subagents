@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
+  toolCallHandlers,
   defaultResourceLoaderCtor,
   loaderExtensionsRef,
   getAgentDir,
@@ -15,10 +16,11 @@ const {
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
+  toolCallHandlers: [] as Array<(event: { toolName: string }) => unknown>,
   defaultResourceLoaderCtor: vi.fn(),
   loaderExtensionsRef: {
     current: { extensions: [], errors: [], runtime: {} } as {
-      extensions: Array<{ path: string; tools: Map<string, unknown> }>;
+      extensions: Array<{ path: string; tools: Map<string, { definition: { name: string; defaultActive?: boolean } }> }>;
       errors: Array<{ path: string; error: string }>;
       runtime: Record<string, unknown>;
     },
@@ -53,6 +55,13 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
       if (this.opts.noExtensions) {
         loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
         return;
+      }
+      for (const entry of this.opts.extensionFactories ?? []) {
+        entry.factory({
+          on: (event: string, handler: (event: { toolName: string }) => unknown) => {
+            if (event === "tool_call") toolCallHandlers.push(handler);
+          },
+        });
       }
       if (this.opts.extensionsOverride) {
         loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
@@ -172,18 +181,20 @@ function createSession(finalText: string) {
     // extension registering after bind by mutating `loaderExtensionsRef`.
     getAllTools: vi.fn(() => {
       const opts = createAgentSession.mock.calls[0]?.[0];
-      return opts ? mockRegistry(opts).map((name) => ({ name })) : [];
+      return opts ? mockRegistry(opts).map((name) => ({ name, exposure: "direct" })) : [];
     }),
-    // pi's Agent; `beforeToolCall` is an optional, assignable hook the scope
-    // installer wraps to block out-of-scope calls on turn 1.
-    agent: { beforeToolCall: undefined } as {
-      beforeToolCall?: (context: any, signal?: any) => Promise<any>;
-    },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
   lastSession = session;
   return { session, listeners };
+}
+
+async function emitToolCall(toolName: string) {
+  for (const handler of toolCallHandlers) {
+    const result = await handler({ toolName });
+    if (result) return result;
+  }
 }
 
 const ctx = {
@@ -201,6 +212,7 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  toolCallHandlers.length = 0;
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
@@ -791,7 +803,7 @@ function withExtensions(spec: Record<string, string[]>) {
   loaderExtensionsRef.current = {
     extensions: Object.entries(spec).map(([path, tools]) => ({
       path,
-      tools: new Map(tools.map((n) => [n, {}])),
+      tools: new Map(tools.map((n) => [n, { definition: { name: n } }])),
     })),
     errors: [],
     runtime: {},
@@ -1198,11 +1210,11 @@ describe("agent-runner master tool allowlist", () => {
       });
 
       await expect(
-        session.agent.beforeToolCall?.({ toolCall: { name: "Agent" } }),
+        emitToolCall("Agent"),
       ).resolves.toMatchObject({ block: true });
       // ...while a nested tool that was NOT denied still passes the same gate.
       await expect(
-        session.agent.beforeToolCall?.({ toolCall: { name: "steer_subagent" } }),
+        emitToolCall("steer_subagent"),
       ).resolves.not.toMatchObject({ block: true });
     });
 
@@ -1222,7 +1234,7 @@ describe("agent-runner master tool allowlist", () => {
 
       expect(customToolNames()).toContain("StructuredOutput");
       await expect(
-        session.agent.beforeToolCall?.({ toolCall: { name: "StructuredOutput" } }),
+        emitToolCall("StructuredOutput"),
       ).resolves.not.toMatchObject({ block: true });
     });
 
@@ -1258,7 +1270,7 @@ describe("agent-runner master tool allowlist", () => {
       await runAgent(ctx, "Explore", "go", { pi, structuredOutput: STRUCTURED });
 
       await expect(
-        session.agent.beforeToolCall?.({ toolCall: { name: "StructuredOutput" } }),
+        emitToolCall("StructuredOutput"),
       ).resolves.not.toMatchObject({ block: true });
     });
 
@@ -1274,7 +1286,7 @@ describe("agent-runner master tool allowlist", () => {
 
       expect(customToolNames()).not.toContain("StructuredOutput");
       await expect(
-        session.agent.beforeToolCall?.({ toolCall: { name: "StructuredOutput" } }),
+        emitToolCall("StructuredOutput"),
       ).resolves.toMatchObject({ block: true });
     });
 
@@ -1548,7 +1560,7 @@ describe("agent-runner async extension tool registration", () => {
   function registerLate(extPath: string, toolName: string) {
     const ext = loaderExtensionsRef.current.extensions.find((e) => e.path === extPath);
     if (!ext) throw new Error(`no loaded extension at ${extPath}`);
-    ext.tools.set(toolName, {});
+    ext.tools.set(toolName, { definition: { name: toolName } });
   }
 
   function setup(o: { builtinToolNames?: string[]; extSelectors?: string[] } = {}) {
@@ -1627,7 +1639,7 @@ describe("agent-runner async extension tool registration", () => {
     expect(session.getActiveToolNames()).not.toContain("drop_me");
   });
 
-  it("beforeToolCall blocks an out-of-scope tool and delegates otherwise", async () => {
+  it("tool_call blocks an out-of-scope tool and passes otherwise", async () => {
     // Turn 1 cannot be narrowed — before_agent_start fires inside prompt() and
     // may widen the set after the turn's tools are snapshotted — so a call-time
     // guard is the only correct enforcement there.
@@ -1639,25 +1651,11 @@ describe("agent-runner async extension tool registration", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     await expect(
-      session.agent.beforeToolCall?.({ toolCall: { name: "bar_tool" } }),
+      emitToolCall("bar_tool"),
     ).resolves.toMatchObject({ block: true });
     await expect(
-      session.agent.beforeToolCall?.({ toolCall: { name: "foo_tool" } }),
+      emitToolCall("foo_tool"),
     ).resolves.toBeUndefined();
-  });
-
-  it("beforeToolCall preserves a hook pi installed before us", async () => {
-    setup();
-    withExtensions({ "/ext/foo.ts": ["foo_tool"] });
-    const { session } = createSession("OK");
-    const prior = vi.fn(async () => undefined);
-    session.agent.beforeToolCall = prior;
-    createAgentSession.mockResolvedValue({ session });
-
-    await runAgent(ctx, "Explore", "go", { pi });
-    await session.agent.beforeToolCall?.({ toolCall: { name: "foo_tool" } });
-
-    expect(prior).toHaveBeenCalledTimes(1);
   });
 
   it("scope outlives runAgent so resumed turns stay narrowed", async () => {
@@ -1678,7 +1676,7 @@ describe("agent-runner async extension tool registration", () => {
     expect(session.getActiveToolNames()).toContain("foo_late");
     expect(session.getActiveToolNames()).not.toContain("bar_late");
     await expect(
-      session.agent.beforeToolCall?.({ toolCall: { name: "bar_late" } }),
+      emitToolCall("bar_late"),
     ).resolves.toMatchObject({ block: true });
   });
 
@@ -1696,7 +1694,7 @@ describe("agent-runner async extension tool registration", () => {
     // asynchronously, so there is no active-set narrowing to maintain.
     expect(createAgentSession.mock.calls[0][0].tools).toEqual(["read"]);
     expect(session.setActiveToolsByName).not.toHaveBeenCalled();
-    expect(session.agent.beforeToolCall).toBeUndefined();
+    expect(toolCallHandlers).toEqual([]);
   });
 });
 

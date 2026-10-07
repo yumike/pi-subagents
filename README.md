@@ -375,6 +375,7 @@ isolated: true                    # hermetic: built-ins only, no extensions/skil
 
 A few rules the examples don't make obvious:
 
+- Tool restrictions apply to both direct calls and nested calls through codemode or `ctx.executeTool()`.
 - `extensions:` is the sole loading authority. `ext:foo` in `tools:` narrows what surfaces; it can't load `foo` on its own. Mismatches fire `extension-error:…` warnings.
 - Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:mcp/search"` exposes only `search` from `mcp`, nothing from any other extension.
 - Extension names match case-insensitively (`[Mcp]` = `[mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
