@@ -5,7 +5,7 @@
  * The unit tests in fleet-list.test.ts drive FleetList with a fake ui/manager.
  * These prove the bits only the extension can: that `tool_execution_start`
  * hands the fleet the live UI (so it captures input), that spawning a background
- * agent actually registers the `belowEditor` widget once the agent has a session,
+ * agent registers the sole `belowEditor` panel with live activity,
  * and that `session_shutdown` tears it down. runAgent is mocked (no LLM); the
  * manager, settings load, completion routing, and lifecycle handlers are real.
  */
@@ -40,7 +40,7 @@ function makePi() {
   return { pi, tools, lifecycle };
 }
 
-/** A UI context with the surfaces the widget + fleet touch; setWidget is spied. */
+/** A UI context with the Fleet surfaces; setWidget is spied. */
 function uiCtx() {
   return {
     setStatus: vi.fn(),
@@ -111,12 +111,15 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     expect(ui.onTerminalInput).toHaveBeenCalled();
   });
 
-  it("registers the belowEditor widget once a spawned agent has a session, then clears it on shutdown", async () => {
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done",
-      session: { dispose: vi.fn() } as any,
-      aborted: false,
-      steered: false,
+  it("renders live activity only below the editor and clears successful runs and shutdown", async () => {
+    type RunResult = Awaited<ReturnType<typeof runAgent>>;
+    let finish!: (result: RunResult) => void;
+    let callbacks: Parameters<typeof runAgent>[3] | undefined;
+    const session = { dispose: vi.fn(), messages: [], subscribe: () => () => {} } as unknown as RunResult["session"];
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      callbacks = options;
+      options.onSessionCreated?.(session);
+      return new Promise<RunResult>(resolve => { finish = resolve; });
     });
 
     const { pi, tools, lifecycle } = makePi();
@@ -130,15 +133,30 @@ describe("FleetView wiring (real extension lifecycle)", () => {
       { prompt: "go", description: "live one", subagent_type: "general-purpose", run_in_background: true },
       undefined,
       undefined,
-      ctxWith(uiCtx()),
+      ctxWith(ui),
     );
     expect(textOf(spawn)).toMatch(/Agent ID:/);
-    await flush(); // completion → fleet.onAgentFinished → update → widget registers
+    await flush();
 
     const fleetRegs = ui.setWidget.mock.calls.filter(c => c[0] === "fleet" && typeof c[1] === "function");
     expect(fleetRegs.length, "fleet widget should register with a render factory").toBeGreaterThan(0);
+    expect(fleetRegs.at(-1)?.[2]).toEqual({ placement: "belowEditor" });
+    const component = fleetRegs.at(-1)![1](
+      { requestRender: () => {} },
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+    );
+    callbacks!.onToolActivity?.({ type: "start", toolName: "read" });
+    expect(component.render(180).join("\n")).toContain("reading…");
+    callbacks!.onToolActivity?.({ type: "end", toolName: "read" });
+    callbacks!.onTextDelta?.("Reviewing", "Reviewing");
+    expect(component.render(180).join("\n")).toContain("Reviewing");
+    expect(ui.setWidget.mock.calls.every(call => call[0] === "fleet")).toBe(true);
+    expect(ui.setStatus.mock.calls.some(call => call[0] === "subagents")).toBe(false);
 
+    finish({ responseText: "done", session, aborted: false, steered: false });
+    await flush();
+    expect(component.render(180)).toEqual([]);
     await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
-    expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined); // dispose cleared it
+    expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined);
   });
 });

@@ -20,7 +20,7 @@ import {
   formatDuration,
   formatSessionTokens,
   formatTurns,
-} from "../../src/ui/agent-widget.js";
+} from "../../src/ui/agent-display.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../../src/usage.js";
 import { NOW, perfSession, perfTheme } from "../helpers/perf-fixtures.js";
 

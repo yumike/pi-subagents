@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { SPINNER } from "../src/ui/agent-widget.js";
+import { SPINNER } from "../src/ui/agent-display.js";
 import { styleWorkflowCardLines, type WorkflowCardTask } from "../src/ui/workflow-card.js";
 import {
   ASCII_DIALOG_GLYPHS,

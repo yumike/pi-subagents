@@ -144,13 +144,14 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
-  it("round-trips widgetMode; keeps valid values, drops invalid", () => {
-    saveSettings({ widgetMode: "off" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
-    saveSettings({ widgetMode: "background" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "background" });
-    writeProject({ widgetMode: "sideways" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
+  it("ignores removed widget settings from global and project files", () => {
+    for (const widgetMode of ["all", "background", "off"]) {
+      writeGlobal({ widgetMode, showModel: true, showCost: true });
+      expect(loadSettings(projectDir)).toEqual({ showCost: true });
+      writeProject({ widgetMode, showModel: false, fleetView: false });
+      expect(loadSettings(projectDir)).toEqual({ showCost: true, fleetView: false });
+      rmSync(projectFile());
+    }
   });
 
   it("round-trips viewerMarkdown; keeps valid values, drops invalid", () => {
@@ -209,15 +210,6 @@ describe("settings persistence", () => {
     // The sanitizer is an allowlist: a key it does not name is dropped, and the
     // setting silently never applies.
     writeProject({ reportUsage: "on", showCost: 1 } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("round-trips showModel; drops non-boolean", () => {
-    saveSettings({ showModel: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ showModel: true });
-    saveSettings({ showModel: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ showModel: false });
-    writeProject({ showModel: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -545,16 +537,15 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
-        setWidgetMode: vi.fn(),
+        setRememberAgents: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
-        setShowModel: vi.fn(),
       };
     });
 
@@ -581,12 +572,13 @@ describe("settings persistence", () => {
       expect(appliers.setShowCost).toHaveBeenCalledWith(false);
     });
 
-    it("applies showModel", () => {
-      applySettings({ showModel: true }, appliers);
-      expect(appliers.setShowModel).toHaveBeenCalledWith(true);
-
-      applySettings({ showModel: false }, appliers);
-      expect(appliers.setShowModel).toHaveBeenCalledWith(false);
+    it("does not apply removed widget settings", () => {
+      const settings = { widgetMode: "all", showModel: true, showCost: true };
+      applySettings(settings, appliers);
+      expect(appliers.setShowCost).toHaveBeenCalledWith(true);
+      for (const [name, apply] of Object.entries(appliers)) {
+        if (name !== "setShowCost") expect(apply).not.toHaveBeenCalled();
+      }
     });
 
     it("is a no-op on an empty settings object", () => {
@@ -633,7 +625,6 @@ describe("settings persistence", () => {
           disableDefaultAgents: true,
           toolDescriptionMode: "compact",
           fleetView: false,
-          widgetMode: "off",
         },
         appliers,
       );
@@ -647,7 +638,6 @@ describe("settings persistence", () => {
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
-      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
     });
 
     it("applies strictAgentFiles; skips it when absent", () => {
@@ -655,13 +645,6 @@ describe("settings persistence", () => {
       expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
       applySettings({}, appliers);
       expect(appliers.setStrictAgentFiles).toHaveBeenCalledTimes(1);
-    });
-
-    it("applies widgetMode; skips it when absent", () => {
-      applySettings({ widgetMode: "off" }, appliers);
-      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
-      applySettings({}, appliers);
-      expect(appliers.setWidgetMode).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
     it("applies viewerMarkdown; skips it when absent", () => {
@@ -796,16 +779,15 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
-        setWidgetMode: vi.fn(),
+        setRememberAgents: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
-        setShowModel: vi.fn(),
       };
     });
 

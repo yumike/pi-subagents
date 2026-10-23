@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord, ViewerMarkdownMode } from "../src/types.js";
-import { type AgentActivity, getDisplayName } from "../src/ui/agent-widget.js";
+import { type AgentActivity, getDisplayName } from "../src/ui/agent-display.js";
 import type { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import {
   FleetList,
@@ -48,7 +48,7 @@ function plain(row: string): string {
   return row.replace(/\u001b\[[0-9;]*m/g, "").replace(/<\/?[a-zA-Z]+>|\*/g, "");
 }
 
-/** A no-op session so a record is "openable" by default (the list hides session-less agents). */
+/** A no-op session so a record is openable by default. */
 const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
 
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
@@ -122,11 +122,14 @@ function harness(
   agents: AgentRecord[],
   opts: {
     tuiMode?: TuiMode;
+    activity?: Map<string, AgentActivity>;
+    renderTheme?: typeof theme;
     scrollbarMode?: () => ScrollViewScrollbar;
     viewerMarkdown?: () => ViewerMarkdownMode;
     onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
   } = {},
 ): Harness {
+  const renderTheme = opts.renderTheme ?? theme;
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
@@ -143,7 +146,7 @@ function harness(
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
-    notify: () => {},
+    notify: vi.fn(),
     custom: ((factory: Parameters<FleetUICtx["custom"]>[0], options?: Parameters<ExtensionUIContext["custom"]>[1]) => {
       opened = true;
       closed = false;
@@ -159,14 +162,14 @@ function harness(
         overlayDone = done;
         // Construct the overlay component so the controller wires viewerClose,
         // and keep it so tests can drive the real ConversationViewer's input.
-        overlayComponent = factory(fakeTui, theme, undefined, done) as ConversationViewer;
+        overlayComponent = factory(fakeTui, renderTheme, undefined, done) as ConversationViewer;
         overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
       });
     }) as FleetUICtx["custom"],
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown, opts.scrollbarMode);
+  const fleet = new FleetList(manager, opts.activity ?? new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown, opts.scrollbarMode);
   fleet.setUICtx(ui);
   let workflows: FleetWorkflow[] = [];
   const openedWorkflows: string[] = [];
@@ -191,7 +194,7 @@ function harness(
     initialOverlayOptions: () => initialOverlayOptions,
     lazyOverlayOptions: () => lazyOverlayOptions,
     press: (data) => inputHandler?.(data),
-    render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
+    render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, renderTheme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
     overlayOpened: () => opened,
     overlayClosed: () => closed,
@@ -511,14 +514,14 @@ describe("FleetList rendering", () => {
     expect(oldIdx).toBeLessThan(newIdx); // earliest sits above the later one
   });
 
-  it("hides agents that have no session yet (pending)", () => {
+  it("shows queued agents before their session exists", () => {
     const agents = [
       makeRecord({ id: "live", description: "running one" }),
       makeRecord({ id: "pending", description: "queued one", status: "queued", session: undefined }),
     ];
     const lines = harness(agents).render();
     expect(lines.some(l => l.includes("running one"))).toBe(true);
-    expect(lines.some(l => l.includes("queued one"))).toBe(false);
+    expect(lines.some(l => l.includes("queued one"))).toBe(true);
   });
 
   it("collapses overflow into a '↓ N more' indicator", () => {
@@ -626,7 +629,7 @@ describe("FleetList overlay lifecycle", () => {
       ...FAKE_SESSION,
       messages: [{ role: "user", content: Array.from({ length: 100 }, (_, i) => `row-${i}`).join("\n"), timestamp: 0 }],
     };
-    const h = harness([makeRecord({ session: session as AgentRecord["session"] })], { tuiMode: "fullscreen", scrollbarMode });
+    const h = harness([makeRecord({ session: session as unknown as AgentRecord["session"] })], { tuiMode: "fullscreen", scrollbarMode });
     try {
       expect(scrollbarMode).not.toHaveBeenCalled();
       h.press(DOWN);
@@ -724,11 +727,206 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().some(l => l.includes("the one"))).toBe(true); // and stays listed while viewed
   });
 
-  it("lingers a finished agent in the list, then drops it after the window", () => {
-    const recent = makeRecord({ id: "r", description: "recent done", status: "completed", completedAt: Date.now() });
-    expect(harness([recent]).render().some(l => l.includes("recent done"))).toBe(true);
-    const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000 });
-    expect(harness([old]).render().some(l => l.includes("old done"))).toBe(false);
+  it("removes successful runs immediately without removing their manager record", () => {
+    const record = makeRecord();
+    const h = harness([record]);
+    try {
+      expect(h.render().length).toBeGreaterThan(0);
+      record.status = "completed";
+      record.completedAt = Date.now();
+      h.fleet.onAgentFinished(record.id);
+      expect(h.render()).toEqual([]);
+      expect(h.manager.listAgents()).toEqual([record]);
+      expect(h.press(DOWN)).toBeUndefined();
+    } finally { h.fleet.dispose(); }
+  });
+
+  it.each(["error", "aborted", "steered", "stopped"] as const)("keeps %s for exactly 30 seconds", status => {
+    vi.useFakeTimers();
+    const record = makeRecord({ status, completedAt: Date.now(), startedAt: Date.now() - 12_000 });
+    const h = harness([record]);
+    try {
+      const output = h.render(240).map(plain).join("\n");
+      expect(output).toContain(status === "steered" ? "turn limit" : status);
+      expect(output).toContain("12s");
+      vi.advanceTimersByTime(29_999);
+      expect(h.render(240).map(plain).join("\n")).toContain("12s");
+      vi.advanceTimersByTime(1);
+      expect(h.render()).toEqual([]);
+    } finally { h.fleet.dispose(); vi.useRealTimers(); }
+  });
+
+  it("keeps completed output open, then removes its row on close", async () => {
+    const record = makeRecord();
+    const h = harness([record]);
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      h.press(ENTER);
+      record.status = "completed";
+      record.completedAt = Date.now();
+      h.fleet.onAgentFinished(record.id);
+      expect(h.overlayClosed()).toBe(false);
+      expect(h.render(240).map(plain).join("\n")).toContain("completed");
+      await h.closeOverlay();
+      expect(h.render()).toEqual([]);
+    } finally { await h.closeOverlay(); h.fleet.dispose(); }
+  });
+});
+
+describe("FleetList single-panel monitoring", () => {
+  it("never starts a refresh timer without a UI", () => {
+    vi.useFakeTimers();
+    const record = makeRecord();
+    const fleet = new FleetList(fakeManager([record]), new Map());
+    try {
+      fleet.ensureTimer();
+      fleet.update();
+      expect(vi.getTimerCount()).toBe(0);
+      record.status = "completed";
+      record.completedAt = Date.now();
+      fleet.onAgentFinished(record.id);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { fleet.dispose(); vi.useRealTimers(); }
+  });
+
+  it("does not start a timer while disabled, but resumes rendering when re-enabled", () => {
+    vi.useFakeTimers();
+    const h = harness([makeRecord()]);
+    try {
+      expect(vi.getTimerCount()).toBe(1);
+      h.fleet.setEnabled(false);
+      h.fleet.ensureTimer();
+      expect(vi.getTimerCount()).toBe(0);
+      h.fleet.setEnabled(true);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(h.render().length).toBeGreaterThan(0);
+    } finally { h.fleet.dispose(); vi.useRealTimers(); }
+  });
+
+  it("updates tool activity, response preview and thinking in the same agent row", () => {
+    const activity: AgentActivity = { activeTools: new Map([["call", "read"]]), responseText: "", toolUses: 1, turnCount: 1 };
+    const h = harness([makeRecord()], { activity: new Map([["a1", activity]]) });
+    try {
+      const rows = () => h.render(240).map(plain);
+      expect(rows().filter(line => line.includes("Sleep then report 1"))).toHaveLength(1);
+      expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("reading…");
+      activity.activeTools.set("second", "read");
+      expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("reading 2 files…");
+      activity.activeTools.clear();
+      activity.responseText = "Checking the result\nMore details";
+      expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("Checking the result");
+      expect(rows().join("\n")).not.toContain("More details");
+      activity.responseText = "";
+      expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("thinking…");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("reserves room for activity beside a long description", () => {
+    const h = harness([makeRecord({ description: "long description ".repeat(50) })], {
+      renderTheme: { fg: (_color, text) => `\u001b[37m${text}\u001b[39m`, bold: text => `\u001b[1m${text}\u001b[22m` },
+      activity: new Map([["a1", { activeTools: new Map([["call", "edit"]]), responseText: "", toolUses: 1, turnCount: 1 }]]),
+    });
+    try {
+      const row = h.render(160).map(plain).find(line => line.includes("long description"))!;
+      expect(row).toContain("editing…");
+      expect(row).toContain("13.1k tokens");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("keeps previews on one terminal line even with control sequences and wide text", () => {
+    const record = makeRecord({ description: "review\n\t界面", status: "error", error: "bad\n\u001b[31mrequest\t界面", completedAt: Date.now() });
+    const h = harness([record]);
+    try {
+      expect(h.render(240).map(plain).join("\n")).toContain("error: bad request 界面");
+      for (const width of [0, 1, 2, 4, 20, 60, 120]) {
+        for (const line of h.render(width)) {
+          expect(line).not.toMatch(/[\r\n\t]/);
+          expect(line).not.toContain("\u001b[31m");
+          expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+        }
+      }
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("explains a pending session and opens it once startup completes", async () => {
+    const record = makeRecord({ status: "queued", session: undefined });
+    const h = harness([record]);
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      h.press(ENTER);
+      expect(h.overlayOpened()).toBe(false);
+      expect(h.ui.notify).toHaveBeenCalledWith("Agent is queued — no session available.", "info");
+      record.status = "running";
+      record.session = FAKE_SESSION as unknown as AgentRecord["session"];
+      h.fleet.update();
+      h.press(ENTER);
+      expect(h.overlayOpened()).toBe(true);
+    } finally { await h.closeOverlay(); h.fleet.dispose(); }
+  });
+
+  it("keeps startup failures visible even without a session", () => {
+    const h = harness([makeRecord({ status: "error", error: "setup failed", session: undefined, completedAt: Date.now() })]);
+    try {
+      expect(h.render(240).map(plain).join("\n")).toContain("error: setup failed");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("shows a resumed agent again after a successful completion", () => {
+    const record = makeRecord({ status: "completed", completedAt: Date.now() });
+    const h = harness([record]);
+    try {
+      expect(h.render()).toEqual([]);
+      record.status = "running";
+      record.completedAt = undefined;
+      h.fleet.update();
+      expect(h.render(240).map(plain).join("\n")).toContain("thinking…");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("keeps selection by identity when an earlier agent completes before Enter", async () => {
+    const agents = [makeRecord({ id: "a", description: "first", startedAt: 1 }), makeRecord({ id: "b", description: "second", startedAt: 2 })];
+    const h = harness(agents);
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      h.press(DOWN);
+      agents[0].status = "completed";
+      agents[0].completedAt = Date.now();
+      h.press(ENTER);
+      expect(h.overlayOpened()).toBe(true);
+      expect(h.render(240).map(plain).find(line => line.includes("second"))).toContain("●");
+      h.overlayComponent()!.handleInput("\r");
+      h.overlayComponent()!.handleInput("continue");
+      h.overlayComponent()!.handleInput("\r");
+      expect(h.manager.steer).toHaveBeenCalledWith("b", "continue");
+    } finally { await h.closeOverlay(); h.fleet.dispose(); }
+  });
+
+  it("returns selection to main rather than opening the next agent when the selected one completes", () => {
+    const agents = [makeRecord({ id: "a", startedAt: 1 }), makeRecord({ id: "b", startedAt: 2 })];
+    const h = harness(agents);
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      agents[0].status = "completed";
+      agents[0].completedAt = Date.now();
+      h.press(ENTER);
+      expect(h.overlayOpened()).toBe(false);
+      expect(h.render().find(line => line.includes("main"))).toContain("●");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("keeps selection when a workflow is inserted ahead of the agents", () => {
+    const h = harness([makeRecord()]);
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      h.setWorkflows([makeWorkflow()]);
+      expect(h.render(240).map(plain).find(line => line.includes("Sleep then report 1"))).toContain("●");
+      expect(h.render(240).map(plain).find(line => line.includes("audit-src"))).toContain("○");
+    } finally { h.fleet.dispose(); }
   });
 });
 

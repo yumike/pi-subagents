@@ -2,9 +2,6 @@
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
 
-<img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
-
-
 https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 <img width="600" alt="pi-color-badges-white" src="https://github.com/user-attachments/assets/555dcae4-333e-4ff0-b420-7b3369c018a4" />
@@ -14,8 +11,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
-- **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
-- **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
+- **FleetView** — the single persistent roster, below the editor: one line per top-level agent with status, description, current activity, elapsed time and tokens. At most five agent/workflow rows plus `main`; queued agents appear too. Navigate from an empty prompt with `↓` or `←`, then `↑`/`↓` and `Enter` to open a conversation or workflow inspector. Successful agents disappear immediately unless currently viewed; errors, aborted, steered and stopped agents linger 30 seconds. `/agents` retains the full history while records remain available. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Fullscreen Pi uses a borderless full-terminal viewer with mouse controls; regular mode keeps the floating viewer. Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too. Assistant text renders as Markdown; `m` cycles that between off, assistant-only and everything (see [Viewer markdown](#persistent-settings))
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
@@ -108,47 +104,36 @@ Restrictions:
 
 ## UI
 
-The extension renders a persistent widget above the editor showing active agents. By default it shows background runs only (`widgetMode: background`) — foreground agents already render inline as the `Agent` tool result, so the widget would otherwise double-render them. Switch to `all` (every agent) or `off` (hide the widget) via `/agents → Settings → Widget`:
+FleetView is the single persistent roster, rendered **below the editor**. Foreground agents also keep their streaming inline `Agent` tool result.
 
-```
-● Agents
-├─ ⠹ Agent  Refactor auth module · ↻5≤30 · 5 tool uses · 33.8k token (62%) · 12.3s
-│    ⎿  editing 2 files…
-├─ ⠹ Explore  Find auth files · ↻3 · 3 tool uses · 12.4k token (8%) · 4.1s
-│    ⎿  searching…
-├─ ⠹ Agent  Long-running task · ↻42 · 38 tool uses · 91.0k token (84% · ⇊2) · 2m17s
-│    ⎿  reading…
-└─ 2 queued
-```
-
-The token field is annotated with two optional signals inside parens:
-- **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
-- **`⇊N`** — number of times the session has compacted, when > 0. Stays dim; the percent's color carries urgency.
-
-Session shutdown, including reload and session replacement, releases the widget and pending completion timers. A switch cancelled before shutdown keeps them active.
+Session shutdown, including reload and session replacement, releases FleetView and pending completion timers. A switch cancelled before shutdown keeps them active.
 
 ### FleetView
 
-Fleet navigation supports custom prompt editors that implement Pi's editor interface without extending its `Editor` class. A blank row separates the list from the footer, including when an overflow indicator is shown.
+Each top-level agent occupies one line with its status, description, current activity, elapsed time and token count. Agents are ordered earliest-launched first. Queued and sessionless agents are shown immediately; `Enter` on one gives an informational message until its session is ready. The panel shows at most five agent/workflow rows plus `main`, with overflow indicators when more are available. A blank row separates the panel from the footer.
 
-While subagents are running, a Claude Code-style navigable list renders **below** the editor:
-
-```
+```text
   esc to interrupt · ← for agents · ↓ to manage
 
   ● main
-  ○ workflow         audit-src                    12/40 agents · 32s · ↓ 26.4k tokens
-  ○ general-purpose  Sleep then report 1                                11s · ↓ 13.1k tokens
-  ○ general-purpose  Sleep then report 2                                11s · ↓ 13.1k tokens
-                                                                                   ↓ 3 more
-
+  ○ workflow  audit-src                                          12/40 agents · 32s · ↓ 26.4k tokens
+  ○ Agent  Find auth files · reading…                                           11s · ↓ 13.1k tokens
+  ○ Agent  Review parser · queued                                                    4s · ↓ 0 tokens
 ```
 
-Running [workflows](#subagentworkflow) appear as a single `workflow` row above the agents, carrying their agent counts in place of a description. `Enter` on one opens the same two-pane inspector `/agents → Workflows` does, rather than a conversation overlay. A run's own agents are *not* listed separately — they belong to the run, which reports for them, so they are filtered out of the fleet list, the above-editor widget, the `/agents` menus and `@handle` resolution exactly as nested children are. They are also outside the `maxConcurrent` pool: the run has its own concurrency cap, and routing a fan-out through the session pool as well would let one workflow starve everything else. The agents are ordered earliest-launched first, and only agents you can actually open are shown (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. The selected row renders in the theme's primary text color rather than the muted/dim treatment of the others; an agent with a configured `color` shows its badge there too, bolded. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+Running [workflows](#subagentworkflow) appear as a single `workflow` row above the agents, carrying their agent counts. `Enter` opens the same two-pane inspector as `/agents → Workflows`. A run's own agents are not listed separately — they belong to the run, which reports for them, so they are filtered out of FleetView, the `/agents` menus and `@handle` resolution exactly as nested children are. They are also outside the `maxConcurrent` pool: the run has its own concurrency cap.
+
+At an **empty prompt**, press `↓` (or `←`) to focus the list. The selected row is marked `●`, the rest `○`; the selected row uses the theme's primary text color, with a bold badge when its agent has a configured `color`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation, and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Custom prompt editors implementing Pi's editor interface are supported, and typing at a non-empty prompt behaves normally.
+
+Inside the conversation, press `Enter` to steer a running agent, type a message, then `Enter` to send; `Esc` or an empty submit returns. The viewer stays open through completion so you can read the final output. Successfully completed agents disappear from the roster immediately unless currently viewed. Errors, aborted, steered and stopped agents linger for 30 seconds; workflow rows retain their separate four-second completion linger. `/agents` retains the full history while records remain available, independent of FleetView's visibility window.
+
+Disable the panel via `/agents → Settings → Fleet view` (`fleetView: false`).
 
 ### Fullscreen conversation viewer
 
 Opening an agent from FleetView, `/agents`, or the workflow inspector fills the terminal when Pi's active renderer is fullscreen. Regular mode retains the centered floating viewer. The layout follows the active renderer, not a mode setting waiting for restart. Neither mode switches the main session or pauses either agent.
+
+The viewer and inline `Agent` result always show the effective model and thinking level. The viewer spells out the canonical `provider/model-id`; when the effective settings differ from the request, it also shows what was asked for.
 
 - Mouse-wheel scrolling pauses following when you scroll up and resumes it at the bottom.
 - Pi's `fullscreenScrollbar` preference is read from the main session when the viewer opens: `auto` overlays the last column on scrolling/hover and hides after inactivity; `always` reserves a column; `hidden` removes the rail and its mouse target. Drag the thumb, or click the track to page and then drag. Resizing cancels an in-progress scrollbar grab.
@@ -193,7 +178,7 @@ The cost is a visible turn — the model's reasoning and its tool block, narrati
 @cyan whats your favorite color        →  (nothing in the chat)
   └─ clone of this conversation, off-screen
        └─ Agent(subagent_type: "cyan", prompt: …)
-            ▸ Cyan Agent   favorite color        ← widget, fleet row, handle
+            ▸ Cyan Agent   favorite color        ← fleet row, handle
 ```
 
 It is a literal clone — the session's own entries and the same system prompt, not [`inherit_context`](#agent-frontmatter)'s text rendering of them — taken from memory and compaction-aware, so what the copy reads is what the main model is working from. The clone gets one tool and one job; it cannot read, write or run anything, because an invisible turn with the full toolset could do invisible work. The agent it starts is attributed to the *real* session, so its transcript and `rootSessionId` land where they would have anyway, and it carries no `tool-use-id` — the main conversation never issued one.
@@ -317,8 +302,8 @@ All fields are optional — sensible defaults for everything.
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
 | `name` | filename | **The agent's type** — what `subagent_type` and `@handle` address. Claude Code's rule: the filename doesn't have to match, so `blubb.md` with `name: code-review` dispatches as `code-review`. Omit it and the filename is used. Any value works except one containing `:`, which Claude Code reserves for plugin-scoped identifiers — such a file is skipped with a warning. Two files may declare the same name; the later load wins, as a filename clash always did |
-| `display_name` | the type | Label shown in the UI (widget, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
-| `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
+| `display_name` | the type | Label shown in the UI (FleetView, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
+| `color` | — | Background color for the agent name badge in the Agent tool header, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[builtin:mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
@@ -589,7 +574,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 There are two independent pools.
 
-**Background** (`maxConcurrent`, default 10). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count. Since agents run in the background by default, nearly every spawn takes a slot; the limit was raised from 4 so that ordinary parallel fan-outs don't queue.
+**Background** (`maxConcurrent`, default 10). Excess agents are automatically queued and start as running agents complete. FleetView shows queued agents as individual rows. Since agents run in the background by default, nearly every spawn takes a slot; the limit was raised from 4 so that ordinary parallel fan-outs don't queue.
 
 **Foreground** (`maxConcurrentForeground`, default `0` = unlimited). Off by default, so nothing changes unless you set it. pi dispatches a message's tool calls through `Promise.all`, so several `Agent` calls with `run_in_background: false` in one message have always started at once — this bounds that. Useful mainly with local models, where parallel agents thrash the prompt cache ([#253](https://github.com/tintinweb/pi-subagents/issues/253)). A queued foreground agent appears in `/agents → Running agents` as `queued` and can be stopped there; its `Agent` call says so while it waits and then returns its result normally.
 
@@ -639,7 +624,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, fleet view on/off, usage reporting on/off, cost display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -668,11 +653,11 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 
 Three things worth knowing about the numbers. Every token component is reported, `cacheRead` included — the cached prefix genuinely is re-read and re-billed on every call, and pi counts it the same way for the session's own messages, so withholding it would make a subagent's rows count differently from every other row in one total. (The extension's *own* token displays still leave it out, which is a different question: there it inflates a reading of how much work was done.) Cost is pi's own per-message figure, priced from the model's listed rates; a model pi has no rates for contributes zero rather than an estimate. Reported child usage does not inflate the parent's context-window percentage; actual returned tool-result text does consume parent context. Agents that finish in the background have no tool result of their own to ride on, so their spend is carried by the next one you make — the footer catches up on the following call, not the moment they finish.
 
-**Show cost** (`showCost`, default `false`): whether the subagent surfaces print an estimated cost beside their token counts — the widget (running *and* finished lines), [FleetView](#fleetview), the conversation viewer, foreground results, `get_subagent_result`, and completion notifications:
+**Show cost** (`showCost`, default `false`): whether the subagent surfaces print an estimated cost beside their token counts — [FleetView](#fleetview), the conversation viewer, foreground results, `get_subagent_result`, and completion notifications:
 
 ```text
-├─ ⠹ Explore  inspect code · ↻3 · 8.2k token · ~$0.0042 · 4.1s
-✓ Explore  inspect code · ↻8 · 5 tool uses · ~$0.0181 · 12.3s
+8.2k tokens · ~$0.0042
+3 agents · 45.1k token · ~$0.042
 ```
 
 When several background agents finish together, their notification is topped with the batch total (`3 agents · 45.1k token · ~$0.042`) so the figures don't have to be added up by hand.
@@ -680,22 +665,6 @@ When several background agents finish together, their notification is topped wit
 The `~` marks it as pi's estimate rather than a billed figure. **A cost is shown only when there is one to show:** a model pi has no pricing data for reports zero, and `$0.00` beside its tokens would say the run was measured and found free rather than never measured — so nothing is printed at all, on every surface. For the same reason a real cost too small to render reads `<$0.0001`. Figures keep cents at minimum and four decimals at most (`~$0.0042`, `~$0.05`, `~$1.24`) — rounding everything to cents would print the same number for runs that differed fourfold.
 
 Independent of `reportUsage`: this one is what you read, that one is what your session counts. Toggle via `/agents → Settings → Show cost`; applied live.
-
-**Show model** (`showModel`, default `false`): whether the widget's running rows name the model driving each agent and the thinking level it is running at:
-
-```text
-├─ ⠹ Explore  inspect code · sonnet 4.6 · thinking: high · ↻3 · 8.2k token · 4.1s
-```
-
-Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal. The other surfaces show the pair either way: the `Agent` tool result names the model beside its tags, and the conversation viewer's `↳` row spells out the canonical `provider/model-id`.
-
-Both places report what the run *actually* used, read back from the child session once pi has resolved its defaults and clamped the level to what the model supports — not what the call asked for. Where those differ, the request is kept beside the effective value rather than dropped, whether pi clamped it or an agent file's frontmatter outranked it:
-
-```text
-  ↳ anthropic/claude-haiku-4-5 · thinking: low (asked max) · background
-```
-
-Toggle via `/agents → Settings → Show model`; applied live.
 
 **Viewer markdown** (`viewerMarkdown`, default `"assistant"`): how much of the [conversation viewer](#ui)'s transcript is rendered as Markdown rather than shown verbatim.
 
@@ -774,7 +743,7 @@ Model/thinking metadata comes from the record's invocation snapshot, not each me
 
 `subagents:disposed` lets a ledger flush usage observed during the existing teardown: its own `session_shutdown` handler may have run earlier. Teardown does not join every active run/resume, child shutdown handlers have a timeout, and late-admitted work can still emit usage afterward; this event does not guarantee complete final spend. Accumulate deltas synchronously and keep the subscription through this event. On quit, use synchronous persistence such as `writeFileSync`, not `fs.promises`; nothing after an event listener's first `await` is guaranteed before Pi exits. It also fires on session replacement, but merely attempting a switch does not emit it.
 
-`tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
+`tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` for current context size.
 
 `usage` answers the other question — what was billed — and so does include `cacheRead`, because the prefix really is re-read and re-charged on every call. It is a pi `Usage`, the same shape pi puts on `ToolResultEvent` and `AssistantMessage`, so `usage.cost.total` is where a listener already expects the money and anything pi adds to `Usage` arrives without a change here. Neither field derives from the other; `tokens` is a view model, `usage` is the data.
 
@@ -833,7 +802,7 @@ pi.events.emit("subagents:rpc:spawn", {
 });
 ```
 
-`options` is the manager's spawn-option object, not the `Agent` tool's parameter schema — the background flag is `isBackground`, and the tool's snake_case `run_in_background` is forwarded verbatim and ignored. Every RPC spawn returns its id immediately and runs detached either way; `isBackground: true` is what makes the agent occupy one of the `maxConcurrent` slots (and queue behind them when they are full). It does not affect `subagents:created`, which is never emitted for an RPC spawn at all — the first event you see for one is `subagents:started`. Leaving it unset starts the agent immediately regardless of the limit. `maxConcurrentForeground` never applies here whatever `isBackground` says: it bounds only spawns a caller is blocking on inline, and every RPC spawn is detached. A top-level RPC spawn renders in the widget and FleetView while it runs, with the same live tool activity and turn counter an `Agent`-tool spawn gets — only an explicit `isBackground: false` is dropped by the widget's default `background` mode, the way a foreground `Agent` call is. Nested spawns stay hidden from both.
+`options` is the manager's spawn-option object, not the `Agent` tool's parameter schema — the background flag is `isBackground`, and the tool's snake_case `run_in_background` is forwarded verbatim and ignored. Every RPC spawn returns its id immediately and runs detached either way; `isBackground: true` is what makes the agent occupy one of the `maxConcurrent` slots (and queue behind them when they are full). It does not affect `subagents:created`, which is never emitted for an RPC spawn at all — the first event you see for one is `subagents:started`. Leaving it unset starts the agent immediately regardless of the limit. `maxConcurrentForeground` never applies here whatever `isBackground` says: it bounds only spawns a caller is blocking on inline, and every RPC spawn is detached. A top-level RPC spawn renders in FleetView with the same live tool activity as an `Agent`-tool spawn, regardless of `isBackground`. Nested spawns stay hidden.
 
 `options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context. Resolution is fuzzy, so a bare `"sonnet"` can land on a provider you never named: with [Model Scope](#model-scope) on, an override that resolves outside `enabledModels` is refused with an error envelope listing the allowed models, exactly as a caller-supplied `Agent({ model })` is. `null` means unset — the agent inherits, same as omitting the field.
 
@@ -1023,8 +992,8 @@ src/
     task.ts           # local_workflow task record and batched progress updates
     tool-description.ts # Model-facing description carrying the orchestration patterns
   ui/
-    agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
-    fleet-list.ts         # FleetView: navigable agent list below the editor
+    agent-display.ts      # Shared agent activity, formatting and display helpers
+    fleet-list.ts         # FleetView: persistent roster and activity below the editor
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer scroll keys resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows

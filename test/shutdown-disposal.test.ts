@@ -4,14 +4,14 @@ import { AgentManager } from "../src/agent-manager.js";
 import { GroupJoinManager } from "../src/group-join.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentWidget } from "../src/ui/agent-widget.js";
+import { FleetList } from "../src/ui/fleet-list.js";
 import { ctx, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 describe("session_shutdown resource disposal", () => {
   let env: ReturnType<typeof hermeticDir>;
   let boot: ReturnType<typeof makePi>;
   let context: ReturnType<typeof ctx>;
-  let widgetDispose: MockInstance<AgentWidget["dispose"]>;
+  let fleetDispose: MockInstance<FleetList["dispose"]>;
   let groupDispose: MockInstance<GroupJoinManager["dispose"]>;
   let registerGroup: MockInstance<GroupJoinManager["registerGroup"]>;
 
@@ -21,7 +21,7 @@ describe("session_shutdown resource disposal", () => {
     boot = makePi();
     context = ctx({ hasUI: true });
     context.ui.onTerminalInput = vi.fn(() => vi.fn());
-    widgetDispose = vi.spyOn(AgentWidget.prototype, "dispose");
+    fleetDispose = vi.spyOn(FleetList.prototype, "dispose");
     groupDispose = vi.spyOn(GroupJoinManager.prototype, "dispose");
     registerGroup = vi.spyOn(GroupJoinManager.prototype, "registerGroup");
     subagentsExtension(boot.pi);
@@ -50,6 +50,7 @@ describe("session_shutdown resource disposal", () => {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
       isBackground: true,
+      session: { messages: [], subscribe: () => () => {} } as unknown as AgentRecord["session"],
     }));
     const spawn = vi.spyOn(AgentManager.prototype, "spawn");
     vi.spyOn(AgentManager.prototype, "getRecord").mockImplementation(id => records.find(record => record.id === id));
@@ -66,7 +67,7 @@ describe("session_shutdown resource disposal", () => {
     return records;
   }
 
-  it("disposes live widget and group timers, including repeated shutdown", async () => {
+  it("disposes live fleet and group timers, including repeated shutdown", async () => {
     const records = await spawnBatch(2);
     await vi.advanceTimersByTimeAsync(100);
     expect(registerGroup).toHaveBeenCalledTimes(1);
@@ -78,16 +79,15 @@ describe("session_shutdown resource disposal", () => {
 
     await boot.lifecycle.get("session_shutdown")({}, context);
 
-    expect(widgetDispose).toHaveBeenCalledTimes(1);
+    expect(fleetDispose).toHaveBeenCalledTimes(1);
     expect(groupDispose).toHaveBeenCalledTimes(1);
     expect(group.isGrouped(records[0].id)).toBe(false);
-    expect(context.ui.setWidget).toHaveBeenCalledWith("agents", undefined);
-    expect(context.ui.setStatus).toHaveBeenCalledWith("subagents", undefined);
+    expect(context.ui.setWidget).toHaveBeenCalledWith("fleet", undefined);
     expect(vi.getTimerCount()).toBe(0);
 
     await boot.lifecycle.get("session_shutdown")({}, context);
 
-    expect(widgetDispose).toHaveBeenCalledTimes(2);
+    expect(fleetDispose).toHaveBeenCalledTimes(2);
     expect(groupDispose).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(30_200);
@@ -101,14 +101,14 @@ describe("session_shutdown resource disposal", () => {
 
     await boot.lifecycle.get("session_before_switch")({}, context);
 
-    expect(widgetDispose).not.toHaveBeenCalled();
+    expect(fleetDispose).not.toHaveBeenCalled();
     expect(groupDispose).not.toHaveBeenCalled();
     expect(group.isGrouped(records[0].id)).toBe(true);
     expect(vi.getTimerCount()).toBeGreaterThan(0);
 
     await boot.lifecycle.get("session_shutdown")({}, context);
 
-    expect(widgetDispose).toHaveBeenCalledTimes(1);
+    expect(fleetDispose).toHaveBeenCalledTimes(1);
     expect(groupDispose).toHaveBeenCalledTimes(1);
     expect(group.isGrouped(records[0].id)).toBe(false);
     expect(vi.getTimerCount()).toBe(0);

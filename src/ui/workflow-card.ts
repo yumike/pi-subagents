@@ -45,7 +45,7 @@ import {
   type WorkflowEntry,
   type WorkflowRunStatus,
 } from "../workflow/progress.js";
-import type { Theme } from "./agent-widget.js";
+import type { Theme } from "./agent-display.js";
 
 /**
  * Header re-render cadence. Claude Code ticks the workflow clock once a second,
