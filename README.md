@@ -49,7 +49,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **1.0.0 or newer**. Development dependencies pin Pi 1.0.0 as the tested baseline; host `peerDependencies` remain `*`, so npm does not enforce that minimum. CI checks both that baseline and the latest Pi release.
+Requires pi **1.4.0 or newer**. Development dependencies pin Pi 1.4.0 as the tested baseline; host `peerDependencies` remain `*`, so npm does not enforce that minimum. CI checks both that baseline and the latest Pi release.
 
 ### Other hosts
 
@@ -385,6 +385,8 @@ A few rules the examples don't make obvious:
 - Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:builtin:mcp/mcp__server__search"` exposes only `mcp__server__search` from native MCP, nothing from any other extension.
 - Extension names match case-insensitively (`[builtin:MCP]` = `[builtin:mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
 - Pi's native extensions are named `builtin:mcp`, `builtin:codemode`, and `builtin:tool-search` in `extensions:`, `exclude_extensions:`, and `ext:` selectors. Bare names such as `mcp` match third-party extensions only, not native ones. **Migration:** replace native-extension references such as `extensions: [mcp]` with `extensions: [builtin:mcp]` and `ext:mcp` with `ext:builtin:mcp`; likewise for codemode and tool-search. Tool names remain `codemode` and `tool_search`. Pi's built-in disabling and replacement settings still apply.
+- Child Pi settings and resource discovery inherit the parent's project-trust decision. Denied trust skips project settings and automatically discovered project extensions/skills; user-level resources remain available. This does not add trust filtering to custom agent discovery or named skill preloading, and explicit filesystem extension paths remain explicit loads, as in Pi's SDK. Project trust is not a sandbox.
+- Parent CLI `--no-extensions` / `-ne` suppress discovered/configured extensions and default native extensions in children. Explicit filesystem paths in an agent's `extensions:` still load and remain tool-scoped; names, `*`, and `ext:` selectors cannot restore disabled discovery. `--no-mcp` disables only native MCP, not third-party replacements. Parent `-e` sources are not newly forwarded. Flags used as option values or after `--` are not treated as disable switches.
 - Pi resolves replacement conflicts before per-agent filtering. Excluding a third-party replacement in an agent definition does not restore the native built-in it replaced. To use the native built-in, disable the conflicting replacement in Pi settings; this affects other sessions using those settings too.
 - Native MCP is skipped with a warning when the execution directory differs from the configuration directory, as with cross-directory RPC spawns. The default native MCP loader uses the execution directory; supporting separate roots would require a custom configuration loader. Skipping prevents loading the target's `mcp.json`. This also disables global and extension-registered native MCP servers for that run. Other extensions are unaffected.
 - Native MCP selectors use full registered names, such as `ext:builtin:mcp/mcp__server__search`. For codemode-exposed tools, also load `builtin:codemode` and allow `ext:builtin:codemode`. Codemode and tool search activate according to Pi settings or MCP exposure; deferred tools are not eagerly declared.

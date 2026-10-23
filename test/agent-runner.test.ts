@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as PiSDK from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -33,7 +34,8 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
+  parseArgs: (await importOriginal<typeof PiSDK>()).parseArgs,
   createAgentSession,
   createCodemodeExtension: () => () => {},
   createMcpExtension: () => () => {},
@@ -52,13 +54,13 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
 
     async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
-        loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
-      }
+      // Explicit paths and inline factories survive noExtensions; discovered paths do not.
+      const explicitPaths = new Set<string>(this.opts.additionalExtensionPaths ?? []);
+      const disabledBuiltins = new Set<string>(this.opts.disabledBuiltinExtensions ?? []);
+      loaderExtensionsRef.current.extensions = loaderExtensionsRef.current.extensions.filter(extension =>
+        (!this.opts.noExtensions || explicitPaths.has(extension.path)) &&
+        (!extension.path.startsWith("builtin:") || !disabledBuiltins.has(extension.path.slice("builtin:".length))),
+      );
       for (const entry of this.opts.extensionFactories ?? []) {
         if (!entry.builtin) entry.factory({
           on: (event: string, handler: (event: { toolName: string }) => unknown) => {
@@ -208,6 +210,7 @@ const ctx = {
   model: undefined,
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
+  isProjectTrusted: () => true,
   sessionManager: {
     getBranch: vi.fn(() => []),
     getSessionFile: vi.fn(() => "/sessions/parent.jsonl"),
@@ -272,7 +275,7 @@ describe("agent-runner final output capture", () => {
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
     }));
-    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir");
+    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir", { projectTrusted: true });
     // Same claim as before `rememberAgents` flipped the default — the effective
     // cwd reaches the session manager — now via the persistent constructor.
     expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, expect.anything());
@@ -280,6 +283,25 @@ describe("agent-runner final output capture", () => {
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
     }));
+  });
+
+  it.each([true, false])("shares the parent's projectTrusted=%s settings across loader and session", async (projectTrusted) => {
+    const { session } = createSession("TRUSTED");
+    createAgentSession.mockResolvedValue({ session });
+    const isProjectTrusted = vi.fn(() => projectTrusted);
+
+    await runAgent({ ...ctx, isProjectTrusted }, "Explore", "go", {
+      pi, cwd: "/tmp/target", configCwd: "/tmp/parent",
+    });
+
+    expect(isProjectTrusted).toHaveBeenCalledTimes(1);
+    expect(settingsManagerCreate).toHaveBeenCalledExactlyOnceWith(
+      "/tmp/parent", "/mock/agent-dir", { projectTrusted },
+    );
+    const settingsManager = settingsManagerCreate.mock.results[0].value;
+    expect(defaultResourceLoaderCtor.mock.calls[0][0].settingsManager).toBe(settingsManager);
+    expect(createAgentSession.mock.calls[0][0].settingsManager).toBe(settingsManager);
+    expect(settingsManagerCreate.mock.invocationCallOrder[0]).toBeLessThan(defaultResourceLoaderCtor.mock.invocationCallOrder[0]);
   });
 
   it("forwards worktreeBase to the prompt builder, and omits it otherwise", async () => {
@@ -880,6 +902,68 @@ function lastToolsPassed(): string[] {
 function lastLoaderOpts(): Record<string, unknown> {
   return defaultResourceLoaderCtor.mock.calls[0][0];
 }
+
+describe("agent-runner parent CLI flags", () => {
+  let previousArgv: string[];
+
+  beforeEach(() => { previousArgv = process.argv; });
+  afterEach(() => { process.argv = previousArgv; });
+
+  it.each([
+    { args: ["--no-extensions"], noExtensions: true, disabled: undefined },
+    { args: ["-ne"], noExtensions: true, disabled: undefined },
+    { args: ["--no-mcp"], noExtensions: false, disabled: ["mcp"] },
+    { args: ["--", "--no-extensions", "--no-mcp"], noExtensions: false, disabled: undefined },
+    { args: ["--system-prompt", "--no-extensions", "--append-system-prompt", "--no-mcp"], noExtensions: false, disabled: undefined },
+  ])("uses SDK parsing for $args", async ({ args, noExtensions, disabled }) => {
+    process.argv = ["node", "pi", ...args];
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig());
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastLoaderOpts().noExtensions).toBe(noExtensions);
+    expect(lastLoaderOpts().disabledBuiltinExtensions).toEqual(disabled);
+  });
+
+  it("keeps explicit agent paths and their late tools scoped under -ne without forwarding parent -e", async () => {
+    process.argv = ["node", "pi", "-ne", "-e", "/ext/parent.ts"];
+    const config = { extensions: ["/ext/child.ts"], extSelectors: ["ext:child/allowed"] };
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig(config));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(config));
+    withExtensions({ "/ext/child.ts": [], "/ext/parent.ts": ["parent_tool"] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastLoaderOpts().noExtensions).toBe(true);
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/ext/child.ts"]);
+    expect(createAgentSession.mock.calls[0][0].tools).toBeUndefined();
+    expect(loaderExtensionsRef.current.extensions.map(extension => extension.path)).toEqual(["/ext/child.ts"]);
+    const extension = loaderExtensionsRef.current.extensions[0];
+    for (const name of ["allowed", "blocked"]) extension.tools.set(name, { definition: { name } });
+    for (const listener of listeners) listener({ type: "turn_end" });
+    expect(session.getActiveToolNames()).toContain("allowed");
+    expect(session.getActiveToolNames()).not.toContain("blocked");
+    await expect(emitToolCall("allowed")).resolves.toBeUndefined();
+    await expect(emitToolCall("blocked")).resolves.toMatchObject({ block: true });
+  });
+
+  it.each(["--no-extensions", "-ne", "--no-mcp"])("suppresses the split-root MCP warning under %s", async (flag) => {
+    process.argv = ["node", "pi", flag];
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig());
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/tmp/target", configCwd: "/tmp/parent", onToolActivity });
+
+    expect(onToolActivity).not.toHaveBeenCalled();
+    expect(lastLoaderOpts().extensionFactories).not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "mcp" })]));
+  });
+});
 
 describe("agent-runner session persistence", () => {
   it("persists by default, so a handle can reopen the conversation later", async () => {
