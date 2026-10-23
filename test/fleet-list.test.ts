@@ -1,4 +1,4 @@
-import { Editor, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, type EditorComponent, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -406,6 +406,56 @@ describe("FleetList vs other focused components (#123)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true });
   });
 
+  it.each([
+    { key: DOWN, text: "" },
+    { key: LEFT, text: "" },
+    { key: DOWN, text: "draft" },
+    { key: LEFT, text: "draft" },
+  ])("recognizes a custom editor without stealing typing: $key / '$text'", ({ key, text }) => {
+    const h = harness([makeRecord()]);
+    const editor = {
+      render: () => [], invalidate: () => {}, handleInput: () => {},
+      getText: vi.fn(() => text), setText: vi.fn(),
+    } satisfies EditorComponent;
+    try {
+      h.setEditorText(text);
+      focusInHarness(h, editor);
+      expect(editor).not.toBeInstanceOf(Editor);
+      expect(h.press(key)).toEqual(text === "" ? { consume: true } : undefined);
+      expect(h.render().some(line => line.includes("enter view"))).toBe(text === "");
+      expect(editor.getText).not.toHaveBeenCalled();
+      expect(editor.setText).not.toHaveBeenCalled();
+    } finally { h.fleet.dispose(); }
+  });
+
+  it.each([
+    { render: () => [], invalidate: () => {}, handleInput: () => {} },
+    { getText: () => "" },
+    { setText: () => {} },
+    { getText: "not callable", setText: () => {} },
+    { getText: () => "", setText: "not callable" },
+  ])("leaves non-editor focus alone, including after activation: %s", component => {
+    const h = harness([makeRecord()]);
+    try {
+      focusInHarness(h, component);
+      expect(h.press(DOWN)).toBeUndefined();
+      focusInHarness(h, realEditor());
+      expect(h.press(DOWN)).toEqual({ consume: true });
+      focusInHarness(h, component);
+      for (const key of [DOWN, LEFT, ENTER, ESC]) expect(h.press(key)).toBeUndefined();
+      expect(h.render().some(line => line.includes("← for agents"))).toBe(true);
+      expect(h.overlayOpened()).toBe(false);
+    } finally { h.fleet.dispose(); }
+  });
+
+  it.each([undefined, null])("allows activation when rendered focus is %s", focused => {
+    const h = harness([makeRecord()]);
+    try {
+      focusInHarness(h, focused);
+      expect(h.press(DOWN)).toEqual({ consume: true });
+    } finally { h.fleet.dispose(); }
+  });
+
   it("assumes the editor when focus is unknowable (no tui yet / nothing focused)", () => {
     const h = harness([makeRecord()]);
     // No render yet → the list has never seen a tui: activation must still work.
@@ -417,7 +467,7 @@ describe("FleetList rendering", () => {
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
     const h = harness([makeRecord({ description: "Sleep then report 1" })]);
     const lines = h.render(120);
-    // hint + blank + main + one agent
+    // hint + blank + main + one agent + blank
     expect(lines[0]).toContain("← for agents");
     expect(lines.find(l => l.includes("main"))).toContain("●"); // main selected by default
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
@@ -456,6 +506,45 @@ describe("FleetList rendering", () => {
     const lines = h.render(120);
     // 8 agents, cap 5 visible → "↓ 3 more"
     expect(lines.some(l => l.includes("↓ 3 more"))).toBe(true);
+  });
+
+  it.each([
+    { agents: 1, workflow: false, lastRow: "report 0" },
+    { agents: 8, workflow: false, lastRow: "↓ 3 more" },
+    { agents: 0, workflow: true, lastRow: "audit-src" },
+    { agents: 1, workflow: true, lastRow: "report 0" },
+  ])("separates the footer from $agents agents / workflow=$workflow", ({ agents, workflow, lastRow }) => {
+    const h = harness(Array.from({ length: agents }, (_, i) =>
+      makeRecord({ id: `a${i}`, description: `report ${i}` })));
+    try {
+      if (workflow) h.setWorkflows([makeWorkflow()]);
+      const lines = h.render(120);
+      expect(lines.at(-1)).toBe("");
+      expect(lines.at(-2)).toContain(lastRow);
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("renders no spacer if the roster empties before the next refresh", () => {
+    const agents = [makeRecord()];
+    const h = harness(agents);
+    try {
+      expect(h.render().at(-1)).toBe("");
+      agents.length = 0;
+      expect(h.render()).toEqual([]);
+    } finally { h.fleet.dispose(); }
+  });
+
+  it("keeps one footer spacer after scrolling to the last row", () => {
+    const h = harness(Array.from({ length: 8 }, (_, i) =>
+      makeRecord({ id: `a${i}`, description: `report ${i}` })));
+    try {
+      h.press(DOWN);
+      for (let i = 0; i < 8; i++) h.press(DOWN);
+      const lines = h.render(120);
+      expect(lines.at(-1)).toBe("");
+      expect(lines.at(-2)).toContain("report 7");
+      expect(lines.some(line => line.includes("↓ 3 more"))).toBe(false);
+    } finally { h.fleet.dispose(); }
   });
 
   it("never emits a line wider than the terminal (guards wrap-induced flicker)", () => {
