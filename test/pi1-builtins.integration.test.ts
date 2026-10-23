@@ -119,7 +119,7 @@ describe("Pi built-in extensions in subagent sessions", () => {
     expect(readFileSync(calls, "utf8").trim().split("\n").sort()).toEqual(["deferred", "direct", "scripted"]);
   });
 
-  it("enforces ext:mcp narrowing inside native codemode and after tool search", async () => {
+  it("enforces ext:builtin:mcp narrowing inside native codemode and after tool search", async () => {
     const calls = configureMcpServer();
     faux.setResponses([
       fauxAssistantMessage([
@@ -133,7 +133,7 @@ describe("Pi built-in extensions in subagent sessions", () => {
       fauxAssistantMessage(fauxToolCall("mcp__local__deferred", {})),
       fauxAssistantMessage("done"),
     ]);
-    const s = await run({ extSelectors: ["ext:mcp/mcp__local__scripted", "ext:codemode", "ext:tool-search"] });
+    const s = await run({ extSelectors: ["ext:builtin:mcp/mcp__local__scripted", "ext:builtin:codemode", "ext:builtin:tool-search"] });
     expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["scripted"]);
     const results = s.messages.filter(m => m.role === "toolResult");
     const script = results.find(m => m.toolName === "codemode");
@@ -182,7 +182,7 @@ describe("Pi built-in extensions in subagent sessions", () => {
       fauxAssistantMessage("done"),
     ]);
 
-    const s = await run({ extensions: ["codemode"] });
+    const s = await run({ extensions: ["builtin:codemode"] });
 
     const result = s.messages.find(m => m.role === "toolResult" && m.toolName === "codemode");
     expect(result).toMatchObject({ isError: false });
@@ -233,8 +233,8 @@ describe("Pi built-in extensions in subagent sessions", () => {
   it.each([
     { config: {}, isolated: true },
     { config: { extensions: false }, isolated: false },
-    { config: { excludeExtensions: ["MCP"] }, isolated: false },
-    { config: { extensions: ["codemode", "tool-search"] }, isolated: false },
+    { config: { excludeExtensions: ["BUILTIN:MCP"] }, isolated: false },
+    { config: { extensions: ["builtin:codemode", "builtin:tool-search"] }, isolated: false },
   ])("does not warn about split-cwd MCP when already excluded: $config / isolated=$isolated", async ({ config, isolated }) => {
     const target = join(cwd, "target");
     mkdirSync(target);
@@ -246,6 +246,19 @@ describe("Pi built-in extensions in subagent sessions", () => {
     });
     expect(s.extensionRunner.getExtensionPaths()).not.toContain("builtin:mcp");
     expect(warnings).toEqual([]);
+  });
+
+  it("warns when builtin:mcp is explicitly selected with a separate config directory", async () => {
+    const target = join(cwd, "target");
+    mkdirSync(target);
+    const warnings: string[] = [];
+    faux.setResponses([fauxAssistantMessage("done")]);
+    const s = await run({ extensions: ["builtin:mcp"] }, false, {
+      cwd: target, configCwd: cwd,
+      onToolActivity: activity => { if (activity.toolName.startsWith("extension-error:")) warnings.push(activity.toolName); },
+    });
+    expect(s.extensionRunner.getExtensionPaths()).not.toContain("builtin:mcp");
+    expect(warnings).toContainEqual(expect.stringMatching(/native MCP.*separate config directory/i));
   });
 
   it("accepts a configured builtin MCP disable with a separate config directory", async () => {
@@ -261,11 +274,12 @@ describe("Pi built-in extensions in subagent sessions", () => {
 
   it.each([
     { config: {}, isolated: false, settings: {}, paths: ["builtin:mcp", "builtin:codemode", "builtin:tool-search"], tools: ["read"] },
-    { config: { extensions: ["MCP"] }, isolated: false, settings: {}, paths: ["builtin:mcp"], tools: ["read"] },
-    { config: { extensions: ["codemode", "tool-search"], extSelectors: ["ext:tool-search/tool_search"] }, isolated: false, settings: { defaultTools: ["+codemode", "+tool_search"] }, paths: ["builtin:codemode", "builtin:tool-search"], tools: ["read", "tool_search"] },
-    { config: { excludeExtensions: ["MCP", "codemode"] }, isolated: false, settings: {}, paths: ["builtin:tool-search"], tools: ["read"] },
+    { config: { extensions: ["BUILTIN:MCP"] }, isolated: false, settings: {}, paths: ["builtin:mcp"], tools: ["read"] },
+    { config: { extensions: ["builtin:codemode", "builtin:tool-search"], extSelectors: ["ext:builtin:tool-search/tool_search"] }, isolated: false, settings: { defaultTools: ["+codemode", "+tool_search"] }, paths: ["builtin:codemode", "builtin:tool-search"], tools: ["read", "tool_search"] },
+    { config: { excludeExtensions: ["BUILTIN:MCP", "builtin:codemode"] }, isolated: false, settings: {}, paths: ["builtin:tool-search"], tools: ["read"] },
+    { config: { extensions: ["mcp", "codemode", "tool-search"] }, isolated: false, settings: {}, paths: [], tools: ["read"] },
     { config: { extensions: false }, isolated: false, settings: {}, paths: [], tools: ["read"] },
-    { config: { extSelectors: ["ext:mcp"] }, isolated: true, settings: {}, paths: [], tools: ["read"] },
+    { config: { extSelectors: ["ext:builtin:mcp"] }, isolated: true, settings: {}, paths: [], tools: ["read"] },
     { config: {}, isolated: false, settings: { extensions: ["-builtin:mcp", "-builtin:tool-search"] }, paths: ["builtin:codemode"], tools: ["read"] },
   ])("honors extension selection and Pi settings: $config / $settings / isolated=$isolated", async ({ config, isolated, settings, paths, tools }) => {
     writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
