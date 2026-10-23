@@ -394,6 +394,7 @@ export interface RunOptions {
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
+  /** Frontmatter is authoritative for top-level runs; nested runs already resolved this locally. */
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -607,6 +608,8 @@ export async function runAgent(
 ): Promise<RunResult> {
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
+  // Nested tools resolved against a fresh local registry, not this shared snapshot.
+  const isolated = options.nested ? options.isolated : agentConfig?.isolated ?? options.isolated;
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -625,11 +628,11 @@ export async function runAgent(
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
 
   // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
+  const extensions = isolated ? false : config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
   // isolation is an intentional override, not a misconfiguration.
-  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
+  const excludeExtensions = isolated ? undefined : config.excludeExtensions;
+  const skills = isolated ? false : config.skills;
 
   // Skill preloading: when skills is string[], preload their content into prompt
   if (Array.isArray(skills)) {
@@ -698,7 +701,7 @@ export async function runAgent(
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
   // is an orphan and warns after reload. `isolated` means no extension tools at all.
   const { extNames, narrowing } = parseExtSelectors(
-    options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
 
@@ -866,7 +869,7 @@ export async function runAgent(
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
     ? options.nestedRuntime
     : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
     ? createNestedSubagentTools({
         manager: nestedRuntime.manager,
         pi: options.pi,

@@ -20,6 +20,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
@@ -708,8 +709,12 @@ export class AgentManager {
     // The project switch is enforced here as well as at the tool boundary
     // because cross-extension RPC forwards its options unvalidated — a schema
     // that omits the field can't stop a caller that never saw the schema.
+    // Owned children already resolved isolation; undefined means off, not a global fallback.
+    const effectiveIsolation = options.workflowId !== undefined || options.parentAgentId !== undefined
+      ? options.isolation
+      : getAgentConfig(type)?.isolation ?? options.isolation;
     let worktreeCwd: string | undefined;
-    if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
+    if (effectiveIsolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
       if (!wt) {
         releaseSlot();
@@ -719,6 +724,8 @@ export class AgentManager {
         );
       }
       record.worktree = wt;
+      record.invocation ??= {};
+      record.invocation.isolation = "worktree";
       // workPath preserves subdirectory scoping for caller-supplied cwds: a
       // cwd deep in a monorepo maps to the same subdir inside the copy, not
       // the copied repo's root. Plain worktree spawns keep the historical

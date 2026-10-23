@@ -768,6 +768,7 @@ import {
   getToolNamesForType,
 } from "../src/agent-types.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
+import { preloadSkills } from "../src/skill-loader.js";
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
@@ -782,7 +783,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     promptMode: "replace" as const,
     inheritContext: false,
     runInBackground: false,
-    isolated: false,
     ...overrides,
   };
 }
@@ -998,6 +998,63 @@ describe("agent-runner session persistence", () => {
       "/repo/.seams/pi-sessions/seam-plan-reviewer",
       { parentSession: "/sessions/parent.jsonl" },
     );
+  });
+});
+
+describe("agent-runner isolated precedence", () => {
+  it.each([
+    { file: true, option: undefined, nested: false, effective: true },
+    { file: true, option: false, nested: false, effective: true },
+    { file: false, option: true, nested: false, effective: false },
+    { file: undefined, option: true, nested: false, effective: true },
+    { file: undefined, option: false, nested: false, effective: false },
+    { file: undefined, option: undefined, nested: false, effective: false },
+    { file: false, option: true, nested: true, effective: true },
+    { file: true, option: false, nested: true, effective: false },
+  ])("file=$file, option=$option, nested=$nested resolves to isolated=$effective", async ({ file, option, nested, effective }) => {
+    const config = {
+      extensions: true, skills: true, excludeExtensions: ["notify"],
+      extSelectors: ["ext:foo/keep"], allowedSubagents: "all",
+    };
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig(config));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({
+      ...config, ...(file !== undefined && { isolated: file }),
+    }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read"]);
+    withExtensions({ "/ext/foo.ts": ["keep", "drop"], "/ext/notify.ts": ["notify_send"] });
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", {
+      pi, onToolActivity, nested, ...(option !== undefined && { isolated: option }),
+      nestedRuntime: { manager: {} as never, parentAgentId: "parent", depth: 1 },
+    });
+
+    expect(lastLoaderOpts()).toMatchObject({ noExtensions: effective, noSkills: effective });
+    expect(onToolActivity).not.toHaveBeenCalled();
+    expect(createNestedSubagentTools).toHaveBeenCalledTimes(effective ? 0 : 1);
+    expect(lastToolsPassed()).toEqual(effective
+      ? ["read"]
+      : ["read", "keep", "Agent", "get_subagent_result", "steer_subagent"]);
+    expect(loaderExtensionsRef.current.extensions.map(extension => extension.path)).toEqual(
+      effective ? [] : ["/ext/foo.ts"],
+    );
+    if (!effective) {
+      await expect(emitToolCall("drop")).resolves.toMatchObject({ block: true });
+      await expect(emitToolCall("keep")).resolves.toBeUndefined();
+    }
+  });
+
+  it.each([true, false])("file isolated=$file controls skill preloading despite the opposite option", async (file) => {
+    vi.mocked(preloadSkills).mockClear();
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ skills: ["review"] }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ isolated: file }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "go", { pi, isolated: !file });
+
+    expect(lastLoaderOpts().noSkills).toBe(true);
+    expect(vi.mocked(preloadSkills).mock.calls).toEqual(file ? [] : [[["review"], "/tmp"]]);
   });
 });
 
