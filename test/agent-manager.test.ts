@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
-import type { AgentRecord } from "../src/types.js";
+import { registerAgents } from "../src/agent-types.js";
+import type { AgentConfig, AgentRecord, IsolationMode } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -20,7 +21,7 @@ vi.mock("../src/worktree.js", () => ({
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { addUsage } from "../src/usage.js";
-import { isWorktreeIsolationEnabled } from "../src/worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -2503,5 +2504,158 @@ describe("AgentManager — effective model and thinking write-back", () => {
     const record = await spawnWithSession({ thinking: "max" }, {});
 
     expect(record.invocation).toEqual({ thinking: "max" });
+  });
+});
+
+describe("AgentManager — agent-file isolation precedence", () => {
+  let manager: AgentManager;
+  const wt = { path: "/wt/a", branch: "pi-agent-a", baseSha: "abc", workPath: "/wt/a" };
+
+  beforeEach(() => {
+    registerAgents(new Map());
+    vi.mocked(createWorktree).mockReset().mockResolvedValue(wt);
+    vi.mocked(cleanupWorktree).mockReset().mockResolvedValue({ hasChanges: false });
+    vi.mocked(isWorktreeIsolationEnabled).mockReset().mockReturnValue(true);
+    vi.mocked(runAgent).mockReset();
+    resolvedRun();
+    manager = new AgentManager();
+  });
+
+  afterEach(async () => {
+    await manager?.dispose();
+    registerAgents(new Map());
+    vi.mocked(createWorktree).mockReset();
+    vi.mocked(cleanupWorktree).mockReset().mockResolvedValue({ hasChanges: false });
+    vi.mocked(isWorktreeIsolationEnabled).mockReset().mockReturnValue(true);
+    vi.mocked(runAgent).mockReset();
+  });
+
+  async function spawnAs(
+    fileIsolation: IsolationMode | undefined,
+    optionIsolation: IsolationMode | undefined,
+    { type = "walled", workflowId, parentAgentId, invocation }: {
+      type?: string;
+      workflowId?: string;
+      parentAgentId?: string;
+      invocation?: AgentRecord["invocation"];
+    } = {},
+  ): Promise<AgentRecord> {
+    const config: AgentConfig = {
+      name: "walled",
+      description: "Isolated agent",
+      extensions: false,
+      skills: false,
+      systemPrompt: "",
+      promptMode: "replace",
+      isolation: fileIsolation,
+    };
+    registerAgents(new Map([[config.name, config]]));
+    const id = manager.spawn(mockPi, mockCtx, type, "go", {
+      description: "go",
+      isBackground: true,
+      isolation: optionIsolation,
+      workflowId,
+      parentAgentId,
+      depth: parentAgentId !== undefined ? 2 : 1,
+      invocation,
+    });
+    await manager.awaitStartup(id);
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    return record;
+  }
+
+  it.each([undefined, "off"] as const)("file worktree wins over caller %s and tags the record", async (isolation) => {
+    const record = await spawnAs("worktree", isolation);
+
+    expect(createWorktree).toHaveBeenCalledExactlyOnceWith(mockPi, mockCtx.cwd, record.id);
+    expect(record.worktree).toEqual(wt);
+    expect(record.invocation?.isolation).toBe("worktree");
+    expect(vi.mocked(runAgent).mock.lastCall?.[3].cwd).toBe(wt.path);
+  });
+
+  it("preserves existing invocation fields while recording actual worktree isolation", async () => {
+    const record = await spawnAs("worktree", "off", {
+      invocation: { isolation: "off", thinking: "high" },
+    });
+
+    expect(record.invocation).toEqual({ isolation: "worktree", thinking: "high" });
+  });
+
+  it("file off blocks caller worktree", async () => {
+    const record = await spawnAs("off", "worktree");
+
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(record.worktree).toBeUndefined();
+    expect(record.invocation?.isolation).toBeUndefined();
+    expect(vi.mocked(runAgent).mock.lastCall?.[3].cwd).toBeUndefined();
+  });
+
+  it.each([undefined, "off", "worktree"] as const)("omitted file isolation falls back to caller %s", async (isolation) => {
+    const record = await spawnAs(undefined, isolation);
+
+    expect(createWorktree).toHaveBeenCalledTimes(isolation === "worktree" ? 1 : 0);
+    expect(record.worktree).toEqual(isolation === "worktree" ? wt : undefined);
+    expect(record.invocation?.isolation).toBe(isolation === "worktree" ? "worktree" : undefined);
+  });
+
+  it.each([undefined, "wf-1"])("project off blocks worktrees with workflowId %s", async (workflowId) => {
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(false);
+    const record = await spawnAs("worktree", "worktree", { workflowId });
+
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(record.worktree).toBeUndefined();
+    expect(record.invocation?.isolation).toBeUndefined();
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, "off", "worktree"] as const)("unknown type preserves caller %s", async (isolation) => {
+    const record = await spawnAs("worktree", isolation, { type: "not-registered" });
+
+    expect(createWorktree).toHaveBeenCalledTimes(isolation === "worktree" ? 1 : 0);
+    expect(record.worktree).toEqual(isolation === "worktree" ? wt : undefined);
+  });
+
+  it.each([undefined, "off"] as const)("workflow caller %s ignores file worktree", async (isolation) => {
+    const record = await spawnAs("worktree", isolation, { workflowId: "wf-1" });
+
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(record.worktree).toBeUndefined();
+    expect(record.invocation?.isolation).toBeUndefined();
+  });
+
+  it.each(["wf-1", ""])("workflow %s caller worktree overrides file off", async (workflowId) => {
+    const record = await spawnAs("off", "worktree", { workflowId });
+
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+    expect(record.worktree).toEqual(wt);
+    expect(record.invocation?.isolation).toBe("worktree");
+  });
+
+  it.each([undefined, "off"] as const)("nested resolved %s ignores stale global worktree", async (isolation) => {
+    const record = await spawnAs("worktree", isolation, { parentAgentId: "parent-1" });
+
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(record.worktree).toBeUndefined();
+    expect(record.invocation?.isolation).toBeUndefined();
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ nested: true, cwd: undefined });
+  });
+
+  it("nested resolved worktree overrides stale global off", async () => {
+    const record = await spawnAs("off", "worktree", { parentAgentId: "parent-1" });
+
+    expect(createWorktree).toHaveBeenCalledExactlyOnceWith(mockPi, mockCtx.cwd, record.id);
+    expect(record.worktree).toEqual(wt);
+    expect(record.invocation?.isolation).toBe("worktree");
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ nested: true, cwd: wt.path });
+  });
+
+  it("fails without running in place when a file-required worktree cannot be created", async () => {
+    vi.mocked(createWorktree).mockResolvedValueOnce(undefined);
+
+    await expect(spawnAs("worktree", undefined)).rejects.toThrow(/isolation: "worktree"/);
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(manager.listAgents()).toEqual([]);
   });
 });

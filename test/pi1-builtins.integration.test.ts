@@ -38,11 +38,11 @@ describe("Pi built-in extensions in subagent sessions", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  async function run(config: Partial<AgentConfig> = {}, isolated = false, options: Pick<RunOptions, "cwd" | "configCwd" | "onToolActivity"> = {}) {
+  async function run(config: Partial<AgentConfig> = {}, isolated?: boolean, options: Pick<RunOptions, "cwd" | "configCwd" | "onToolActivity" | "nested"> = {}) {
     registerAgents(new Map([["builtin-test", {
       name: "builtin-test", description: "builtin-test", builtinToolNames: ["read"],
       extensions: true, skills: false, persistSession: false,
-      systemPrompt: "Test tools.", promptMode: "replace", inheritContext: false, runInBackground: false, isolated: false,
+      systemPrompt: "Test tools.", promptMode: "replace", inheritContext: false, runInBackground: false,
       ...config,
     }]]));
     const ctx = { cwd, model: faux.getModel(), modelRegistry: new ModelRegistry(runtime), getSystemPrompt: () => "parent" } as ExtensionContext;
@@ -117,6 +117,41 @@ describe("Pi built-in extensions in subagent sessions", () => {
     const results = s.messages.filter(m => m.role === "toolResult");
     expect(results.filter(m => m.isError)).toEqual([]);
     expect(readFileSync(calls, "utf8").trim().split("\n").sort()).toEqual(["deferred", "direct", "scripted"]);
+  });
+
+  it.each([
+    { file: true, option: undefined, nested: false, effective: true },
+    { file: true, option: false, nested: false, effective: true },
+    { file: false, option: true, nested: false, effective: false },
+    { file: false, option: true, nested: true, effective: true },
+    { file: true, option: false, nested: true, effective: false },
+  ])("resolves file isolated=$file, option=$option, nested=$nested for native extensions", async ({ file, option, nested, effective }) => {
+    const calls = configureMcpServer();
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultTools: ["+codemode", "+tool_search"] }));
+    faux.setResponses(effective ? [fauxAssistantMessage("done")] : [
+      fauxAssistantMessage([
+        fauxToolCall("codemode", { code: "text('native result');" }),
+        fauxToolCall("mcp__local__direct", {}),
+      ]),
+      fauxAssistantMessage("done"),
+    ]);
+
+    const s = await run({ isolated: file }, option, { nested });
+
+    expect(s.extensionRunner.getExtensionPaths().filter(path => path.startsWith("builtin:")).sort()).toEqual(
+      effective ? [] : ["builtin:codemode", "builtin:mcp", "builtin:tool-search"],
+    );
+    if (effective) {
+      expect(s.getAllTools().map(tool => tool.name)).toEqual(["read"]);
+      expect(s.getActiveToolNames()).toEqual(["read"]);
+      expect(readFileSync(calls, "utf8")).toBe("");
+    } else {
+      expect(s.getActiveToolNames()).toEqual(expect.arrayContaining(["codemode", "tool_search", "mcp__local__direct"]));
+      const results = s.messages.filter(message => message.role === "toolResult");
+      expect(results.filter(result => result.isError)).toEqual([]);
+      expect(JSON.stringify(results.find(result => result.toolName === "codemode")?.content)).toContain("native result");
+      expect(readFileSync(calls, "utf8")).toBe("direct\n");
+    }
   });
 
   it("enforces ext:builtin:mcp narrowing inside native codemode and after tool search", async () => {
