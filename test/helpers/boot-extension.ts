@@ -50,6 +50,7 @@ export function makePi(flags: Record<string, boolean | string> = {}): BootedPi {
     registerCommand: vi.fn((name: string, command: any) => commands.set(name, command)),
     registerFlag: vi.fn((name: string, options: any) => registeredFlags.set(name, options)),
     getFlag: vi.fn((name: string) => flags[name]),
+    getSettings: vi.fn(() => ({})),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: {
       emit: vi.fn(),
