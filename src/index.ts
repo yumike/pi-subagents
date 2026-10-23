@@ -929,10 +929,11 @@ export default function (pi: ExtensionAPI) {
         // agent, so its frontmatter is what governs — `output_transcript: false`
         // must keep holding, since record.outputFile is the sole gate every
         // downstream consumer keys off and a resume must not re-open it.
+        reloadCustomAgents();
         const config = getAgentConfig(record.type);
         const resumedRecord = await startBackgroundResume(ctx, record, mention.message, {
           outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
-          maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
+          maxTurns: resumeTurnLimit(record),
         });
         ctx.ui.notify(
           resumedRecord ? `Resuming ${target}` : `Could not resume ${target} — it is still running.`,
@@ -1269,6 +1270,11 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function resumeTurnLimit(record: AgentRecord, explicit?: number): number | undefined {
+    // Keep zero until the runner resolves the budget: undefined would revive a stored limit.
+    return getAgentConfig(record.type)?.maxTurns ?? explicit ?? record.invocation?.maxTurns;
+  }
+
   /**
    * Launch a detached resume of an existing agent and wire everything a
    * re-running agent needs: transcript anchoring, activity tracking, join-mode
@@ -1307,7 +1313,7 @@ export default function (pi: ExtensionAPI) {
     // this index, so it is written exactly once.
     const transcriptAnchor = existing.session?.messages.length ?? 0;
 
-    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(opts.maxTurns);
+    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(resolveEffectiveMaxTurns(existing.type, opts.maxTurns));
     // resumeAgent has no onSessionCreated — the session predates this run —
     // so seed it directly, or the widget shows no context % for the agent.
     bgState.session = existing.session;
@@ -1318,6 +1324,8 @@ export default function (pi: ExtensionAPI) {
     // run_in_background in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
+      maxTurns: opts.maxTurns,
+      onTurnEnd: bgCallbacks.onTurnEnd,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
       // Fires when the run actually starts — immediately, or on queue
@@ -1624,8 +1632,8 @@ Terse command-style prompts produce shallow, generic work.
       ),
       max_turns: Type.Optional(
         Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
-          minimum: 1,
+          description: "Maximum number of agentic turns per run, including each resume. Frontmatter takes precedence; 0 means unlimited. Omit to inherit the configured or stored budget.",
+          minimum: 0,
         }),
       ),
       run_in_background: Type.Optional(
@@ -1635,7 +1643,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. Each resume gets a fresh max_turns budget, governed by the existing agent's type, not subagent_type. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
       isolated: Type.Optional(
@@ -1789,7 +1797,8 @@ Terse command-style prompts produce shallow, generic work.
       // make a live agent unresumable the moment its type is deleted, disabled,
       // or gains a case-clashing sibling. Only a real spawn is gated.
       if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
-      const subagentType = dispatch.ok ? dispatch.type : rawType;
+      const resumeRecord = params.resume ? manager.getRecord(params.resume) : undefined;
+      const subagentType = resumeRecord?.type ?? (dispatch.ok ? dispatch.type : rawType);
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
       // once persisted an empty type into a scheduled job.
@@ -1882,9 +1891,8 @@ Terse command-style prompts produce shallow, generic work.
         // disclose a parameter that was accepted but could not take effect (#182).
         requestedThinking: resolvedConfig.overridden?.thinking,
         requestedModel: askedModel,
-        // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
-        maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
+        // Keep explicit zero for resumes; display tags hide the unlimited sentinel.
+        maxTurns: resolvedConfig.maxTurns,
         isolated,
         inheritContext,
         runInBackground,
@@ -1983,27 +1991,23 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
 
+        const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns);
+        if (existing.status === "running" || existing.status === "queued") {
+          return textResult(
+            `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+            `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+          );
+        }
+
         // Background resume: detached run that notifies on completion, mirroring
         // a background spawn. Previously run_in_background was silently ignored
         // on resume (this branch returned before the background branch below),
         // so a resumed agent always blocked the main loop until it finished.
         if (runInBackground) {
           const id = existing.id;
-          // A detached resume hands control back while the record stays
-          // "running", so nothing stops the model from resuming the same agent
-          // again mid-run. manager.resume() refuses that (it would orphan the
-          // live run's abort controller); say why here, where the model can act
-          // on it, instead of letting it read as a generic failure.
-          if (existing.status === "running" || existing.status === "queued") {
-            return textResult(
-              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
-              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
-            );
-          }
-
           const record = await startBackgroundResume(ctx, existing, params.prompt, {
             outputTranscript,
-            maxTurns: effectiveMaxTurns,
+            maxTurns: resumeMaxTurns,
             toolCallId,
           });
           if (!record) {
@@ -2023,18 +2027,51 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const streamResumeUpdate = () => {
+          onUpdate?.({
+            content: [{ type: "text", text: `${resumeState.toolUses} tool uses...` }],
+            details: buildDetails(detailBaseFor(existing), existing, resumeState, {
+              status: "running",
+              toolUses: resumeState.toolUses,
+              activity: describeActivity(resumeState.activeTools, resumeState.responseText),
+            }),
+          });
+        };
+        const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(
+          resolveEffectiveMaxTurns(existing.type, resumeMaxTurns), streamResumeUpdate,
+        );
+        // No session-created event fires on resume, but the widget still needs context usage.
+        resumeState.session = existing.session;
+        agentActivity.set(existing.id, resumeState);
+        widget.markRunning(existing.id);
+        widget.ensureTimer();
+        fleet.ensureTimer();
+        fleet.update();
+        let record: AgentRecord | undefined;
+        try {
+          streamResumeUpdate();
+          record = await manager.resume(params.resume, params.prompt, signal, {
+            maxTurns: resumeMaxTurns,
+            onTurnEnd: resumeCallbacks.onTurnEnd,
+            onToolActivity: resumeCallbacks.onToolActivity,
+            onAssistantUsage: resumeCallbacks.onAssistantUsage,
+          });
+        } finally {
+          agentActivity.delete(existing.id);
+          widget.markFinished(existing.id);
+          fleet.onAgentFinished(existing.id);
+        }
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record));
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record, resumeState));
         }
         return textResult(
-          record.result?.trim() || "No output.",
-          buildDetails(detailBaseFor(record), record),
+          (record.result?.trim() || "No output.") + getForegroundOutcomeNote(record.status),
+          buildDetails(detailBaseFor(record), record, resumeState),
         );
       }
 
@@ -2062,7 +2099,7 @@ Terse command-style prompts produce shallow, generic work.
           description: params.description,
           name: params.name as string | undefined,
           model,
-          maxTurns: effectiveMaxTurns,
+          maxTurns: resolvedConfig.maxTurns ?? effectiveMaxTurns,
           isolated,
           inheritContext,
           thinkingLevel: thinking,
@@ -2216,7 +2253,7 @@ Terse command-style prompts produce shallow, generic work.
           description: params.description,
           name: params.name as string | undefined,
           model,
-          maxTurns: effectiveMaxTurns,
+          maxTurns: resolvedConfig.maxTurns ?? effectiveMaxTurns,
           isolated,
           inheritContext,
           thinkingLevel: thinking,

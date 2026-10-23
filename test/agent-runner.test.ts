@@ -164,7 +164,10 @@ function createSession(finalText: string) {
     messages: [] as any[],
     subscribe: vi.fn((listener: (event: any) => void) => {
       listeners.push(listener);
-      return () => {};
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index !== -1) listeners.splice(index, 1);
+      };
     }),
     prompt: vi.fn(async () => {
       session.messages.push({
@@ -362,7 +365,7 @@ describe("agent-runner final output capture", () => {
   it("resumeAgent also falls back to the final assistant message text", async () => {
     const { session } = createSession("RESUMED");
 
-    const result = await resumeAgent(session as any, "Continue");
+    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
@@ -493,7 +496,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push(errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "Continue");
+    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
   });
@@ -510,7 +513,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push({ role: "user", content: "follow-up" }, errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "follow-up");
+    const result = await resumeAgent(session as any, "follow-up", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe(""); // NOT "PREVIOUS ANSWER"
@@ -529,7 +532,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       );
     }) as any;
 
-    const result = await resumeAgent(session as any, "go");
+    const result = await resumeAgent(session as any, "go", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe("new partial"); // this resume's progress, not the prior answer
@@ -634,6 +637,7 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     await resumeAgent(session as any, "continue", {
+      type: "Explore",
       onAssistantUsage: (u) => seen.push(u),
     });
 
@@ -1725,7 +1729,7 @@ describe("agent-runner async extension tool registration", () => {
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
-    await resumeAgent(session as any, "keep going");
+    await resumeAgent(session as any, "keep going", { type: "Explore" });
 
     registerLate("/ext/foo.ts", "foo_late");
     registerLate("/ext/bar.ts", "bar_late");
@@ -2634,7 +2638,7 @@ describe("resolveEffectiveMaxTurns", () => {
 // flags mocks `runAgent` outright, so the flags are asserted but never produced.
 // The machine is what stops a runaway subagent, so a broken latch is either an
 // agent that never wraps up and never aborts, or one that aborts on turn 1.
-describe("agent-runner turn limits", () => {
+describe.each(["spawn", "resume"] as const)("agent-runner %s turn limits", (mode) => {
   let prevMax: number | undefined;
   let prevGrace: number;
 
@@ -2653,8 +2657,7 @@ describe("agent-runner turn limits", () => {
    * Run an agent whose prompt fires `turns` synthetic turn_end events before it
    * produces its final message — the same events a real session emits.
    */
-  async function runWithTurns(turns: number, options: Record<string, unknown> = {}) {
-    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+  async function runWithTurns(turns: number, options: Record<string, unknown> = {}, typeMaxTurns?: number) {
     const { session, listeners } = createSession("OK");
     session.prompt.mockImplementation(async () => {
       for (let i = 0; i < turns; i++) {
@@ -2663,8 +2666,16 @@ describe("agent-runner turn limits", () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
     createAgentSession.mockResolvedValue({ session });
-    const result = await runAgent(ctx, "Explore", "go", { pi, ...options });
-    return { session, result };
+    let result: { aborted: boolean; steered: boolean } | undefined;
+    await vi.mocked(getAgentConfig).withImplementation(
+      () => makeAgentConfig({ maxTurns: typeMaxTurns }),
+      async () => {
+        result = mode === "spawn"
+          ? await runAgent(ctx, "Explore", "go", { pi, ...options })
+          : await resumeAgent(session as never, "go", { type: "Explore", ...options });
+      },
+    );
+    return { session, result: result! };
   }
 
   it("does not steer or abort below the limit", async () => {
@@ -2708,8 +2719,9 @@ describe("agent-runner turn limits", () => {
     expect(result.steered).toBe(true);
   });
 
-  it("treats maxTurns 0 as unlimited", async () => {
-    const { session } = await runWithTurns(30, { maxTurns: 0 });
+  it("treats maxTurns 0 as unlimited over type and default budgets", async () => {
+    setDefaultMaxTurns(2);
+    const { session } = await runWithTurns(30, { maxTurns: 0 }, 3);
     expect(session.steer).not.toHaveBeenCalled();
     expect(session.abort).not.toHaveBeenCalled();
   });
@@ -2735,10 +2747,203 @@ describe("agent-runner turn limits", () => {
     expect(session.steer).not.toHaveBeenCalled();
   });
 
+  it("uses the type budget before the default", async () => {
+    setDefaultMaxTurns(20);
+    const { session, result } = await runWithTurns(3, {}, 3);
+    expect(session.steer).toHaveBeenCalledTimes(1);
+    expect(result.steered).toBe(true);
+  });
+
+  it("uses an explicit budget before the type budget", async () => {
+    setDefaultMaxTurns(1);
+    const { session, result } = await runWithTurns(3, { maxTurns: 10 }, 2);
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(result.steered).toBe(false);
+  });
+
+  it("uses a zero type budget before a finite default", async () => {
+    setDefaultMaxTurns(2);
+    const { session, result } = await runWithTurns(30, {}, 0);
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(session.abort).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ steered: false, aborted: false });
+  });
+
   it("reports each turn to the caller's counter", async () => {
     const onTurnEnd = vi.fn();
     await runWithTurns(3, { maxTurns: 10, onTurnEnd });
     expect(onTurnEnd.mock.calls.map(c => c[0])).toEqual([1, 2, 3]);
+  });
+});
+
+describe("agent-runner resume observation", () => {
+  it("starts fresh counters and limit latches on every resume", async () => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    session.prompt.mockImplementation(async () => {
+      for (let turn = 0; turn < 2; turn++) {
+        for (const listener of [...listeners]) listener({ type: "turn_end" });
+      }
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+    const onTurnEnd = vi.fn();
+    await runAgent(ctx, "Explore", "start", { pi, maxTurns: 2, onTurnEnd });
+    expect(listeners).toHaveLength(0);
+
+    for (let run = 0; run < 2; run++) {
+      const result = await resumeAgent(session as never, "continue", { type: "Explore", maxTurns: 2, onTurnEnd });
+      expect(result).toMatchObject({ steered: true, aborted: false });
+      expect(listeners).toHaveLength(0);
+    }
+
+    expect(onTurnEnd.mock.calls).toEqual([[1], [2], [1], [2], [1], [2]]);
+    expect(session.steer).toHaveBeenCalledTimes(3);
+    expect(session.abort).not.toHaveBeenCalled();
+  });
+
+  it("preserves text, tool activity, usage, and compaction callbacks", async () => {
+    const { session, listeners } = createSession("");
+    const onTextDelta = vi.fn();
+    const onToolActivity = vi.fn();
+    const onAssistantUsage = vi.fn();
+    const onCompaction = vi.fn();
+    session.prompt.mockImplementation(async () => {
+      const events = [
+        { type: "message_start", message: { role: "assistant" } },
+        { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "first" } },
+        { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: " answer" } },
+        { type: "tool_execution_start", toolName: "read" },
+        { type: "tool_execution_end", toolName: "read" },
+        { type: "message_end", message: { role: "assistant", usage: { input: 5 } } },
+        { type: "message_end", message: { role: "user", usage: { input: 99 } } },
+        { type: "message_end", message: { role: "assistant" } },
+        { type: "compaction_end", aborted: false, reason: "threshold", result: { tokensBefore: 42 } },
+        { type: "compaction_end", aborted: true, reason: "manual", result: { tokensBefore: 99 } },
+        { type: "compaction_end", aborted: false, reason: "manual" },
+        { type: "message_start", message: { role: "assistant" } },
+        { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "final" } },
+        { type: "message_start", message: { role: "toolResult" } },
+      ];
+      for (const event of events) {
+        for (const listener of [...listeners]) listener(event);
+      }
+    });
+
+    const result = await resumeAgent(session as never, "continue", {
+      type: "Explore", onTextDelta, onToolActivity, onAssistantUsage, onCompaction,
+    });
+
+    expect(result.text).toBe("final");
+    expect(onTextDelta.mock.calls).toEqual([["first", "first"], [" answer", "first answer"], ["final", "final"]]);
+    expect(onToolActivity.mock.calls).toEqual([[{ type: "start", toolName: "read" }], [{ type: "end", toolName: "read" }]]);
+    expect(onAssistantUsage.mock.calls).toEqual([[{ input: 5, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }]]);
+    expect(onCompaction.mock.calls).toEqual([[{ reason: "threshold", tokensBefore: 42 }]]);
+  });
+});
+
+describe.each(["spawn", "resume"] as const)("agent-runner %s observer cleanup", (mode) => {
+  it("does not prompt an already-aborted signal or return prior output", async () => {
+    const { session, listeners } = createSession("SHOULD NOT RUN");
+    session.messages.push({
+      role: "assistant", content: [{ type: "text", text: "PREVIOUS ANSWER" }],
+      stopReason: "error", errorMessage: "previous failure",
+    });
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const onTurnEnd = vi.fn();
+    const options = { signal: controller.signal, onTurnEnd };
+
+    const result = mode === "spawn"
+      ? await runAgent(ctx, "Explore", "go", { pi, ...options })
+      : await resumeAgent(session as never, "go", { type: "Explore", ...options });
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(onTurnEnd).not.toHaveBeenCalled();
+    expect("responseText" in result ? result.responseText : result.text).toBe("");
+    expect(result.failure).toBeUndefined();
+    expect(result).toMatchObject({ aborted: false, steered: false });
+    expect(listeners).toHaveLength(0);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  it.each(["success", "error", "abort"])("cleans up after %s without removing lifetime subscribers", async (outcome) => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    const lifetime = vi.fn();
+    session.subscribe(lifetime);
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const onTurnEnd = vi.fn();
+    session.prompt.mockImplementation(async () => {
+      for (const listener of [...listeners]) listener({ type: "turn_end" });
+      if (outcome === "error") throw new Error("prompt failed");
+      if (outcome === "abort") controller.abort();
+    });
+    const options = { maxTurns: 1, signal: controller.signal, onTurnEnd };
+    const pending = mode === "spawn"
+      ? runAgent(ctx, "Explore", "go", { pi, ...options })
+      : resumeAgent(session as never, "go", { type: "Explore", ...options });
+    if (outcome === "error") await expect(pending).rejects.toThrow("prompt failed");
+    else await pending;
+
+    expect(listeners).toEqual([lifetime]);
+    expect(remove).toHaveBeenCalledWith("abort", add.mock.calls[0][1]);
+    for (const listener of [...listeners]) listener({ type: "turn_end" });
+    controller.abort();
+    expect(onTurnEnd.mock.calls).toEqual([[1]]);
+    expect(session.steer).toHaveBeenCalledTimes(1);
+    expect(session.abort).toHaveBeenCalledTimes(outcome === "abort" ? 1 : 0);
+    expect(lifetime).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("agent-runner structured retry observation", () => {
+  it.each([1, 2])("keeps the turn observer live with %i initial turns", async (initialTurns) => {
+    const previousGrace = getGraceTurns();
+    setGraceTurns(1);
+    try {
+      const { session, listeners } = createSession("");
+      createAgentSession.mockResolvedValue({ session });
+      const onTurnEnd = vi.fn();
+      session.prompt.mockImplementation(async () => {
+        const turns = session.prompt.mock.calls.length === 1 ? initialTurns : 1;
+        for (let turn = 0; turn < turns; turn++) {
+          for (const listener of [...listeners]) listener({ type: "turn_end" });
+        }
+      });
+
+      const result = await runAgent(ctx, "Explore", "go", {
+        pi, maxTurns: 1, structuredOutput: STRUCTURED, onTurnEnd,
+      });
+
+      expect(session.prompt).toHaveBeenCalledTimes(initialTurns === 1 ? 2 : 1);
+      expect(result.structuredRetried).toBe(initialTurns === 1 ? true : undefined);
+      expect(result).toMatchObject({ aborted: true, steered: true });
+      expect(session.steer).toHaveBeenCalledTimes(1);
+      expect(session.abort).toHaveBeenCalledTimes(1);
+      expect(onTurnEnd.mock.calls).toEqual([[1], [2]]);
+      expect(listeners).toHaveLength(0);
+    } finally {
+      setGraceTurns(previousGrace);
+    }
+  });
+
+  it("skips both prompts when already aborted", async () => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi, structuredOutput: STRUCTURED, signal: controller.signal,
+    });
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(result.structuredRetried).toBeUndefined();
+    expect(listeners).toHaveLength(0);
   });
 });
 

@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -284,6 +285,44 @@ describe("child-safe nested Agent tools", () => {
       prompt: "Continue",
     })).isError).toBe(true);
     expect(manager.resume).not.toHaveBeenCalled();
+  });
+
+  it("accepts an unlimited zero budget in the nested Agent schema", () => {
+    const [agent] = tools();
+    const params = { subagent_type: "scout", prompt: "Continue", description: "Continue", resume: "child-1", max_turns: 0 };
+    expect(Value.Check(agent.parameters, params)).toBe(true);
+    expect(Value.Check(agent.parameters, { ...params, max_turns: -1 })).toBe(false);
+  });
+
+  it.each([
+    { frontmatter: undefined, explicit: 12, expected: 12 },
+    { frontmatter: undefined, explicit: 0, expected: 0 },
+    { frontmatter: undefined, explicit: undefined, expected: undefined },
+    { frontmatter: 7, explicit: 12, expected: 7 },
+    { frontmatter: 7, explicit: 0, expected: 7 },
+    { frontmatter: 0, explicit: 12, expected: 0 },
+  ])("resumes with the owned type's local budget: $frontmatter / $explicit", async ({ frontmatter, explicit, expected }) => {
+    writeAgent("reviewer", "max_turns: 99\n");
+    const record = { id: "child-1", type: "scout", status: "completed", result: "done", parentAgentId: "parent-1" };
+    records.set(record.id, record);
+    vi.mocked(manager.resume).mockResolvedValue(records.get(record.id));
+    const [agent] = tools();
+    // The tools and process-global registry both predate this edit.
+    writeAgent("scout", frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`);
+    const before = getAvailableTypes();
+    const controller = new AbortController();
+
+    const result = await agent.execute("resume", {
+      resume: record.id, subagent_type: "reviewer", description: "Continue", prompt: "Continue", max_turns: explicit,
+    }, controller.signal, undefined, ctx());
+
+    expect(result.isError).toBe(false);
+    expect(manager.resume).toHaveBeenCalledWith(record.id, "Continue", controller.signal, { maxTurns: expected });
+    expect(getAvailableTypes()).toEqual(before);
+
+    writeAgent("scout", "max_turns: 3\n");
+    await execute(agent, { resume: record.id, subagent_type: "reviewer", description: "Again", prompt: "Again", max_turns: 21 });
+    expect(manager.resume).toHaveBeenLastCalledWith(record.id, "Again", undefined, { maxTurns: 3 });
   });
 
   it("reports a background child that fails to start as a tool error", async () => {
