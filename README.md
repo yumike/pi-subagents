@@ -303,7 +303,7 @@ All fields are optional — sensible defaults for everything.
 | `display_name` | the type | Label shown in the UI (widget, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
 | `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
-| `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
+| `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[builtin:mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
 | `skills` | `true` | `true` inherits the parent's skills; `false` inherits none. A comma-separated list preloads **only** those skills into the system prompt and does not inherit the rest (see [Skill Preloading](#skill-preloading) for discovery locations) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
@@ -358,17 +358,17 @@ Because a subagent session never activates this extension (that is what keeps a 
 tools: read, grep, find           # narrow to listed built-ins; extensions still load
 tools: "*"                        # all 7 built-ins (alias: `all`)
 tools: none                       # zero built-ins (alias: `""`)
-tools: "*, ext:mcp/search"        # built-ins plus one extension tool
+tools: "*, ext:builtin:mcp/mcp__server__search"  # built-ins plus one native MCP tool
 
 extensions: false                 # no extensions load
-extensions: [mcp]                 # only mcp loads
+extensions: [builtin:mcp]          # only native MCP loads
 extensions: ["*", "/abs/foo.ts"]  # all defaults plus one path-loaded extension
 
 exclude_extensions: pi-notify     # everything except pi-notify (with extensions: true)
 
 # Specialist: load one extension, expose only one of its tools, keep built-ins
-extensions: [mcp]
-tools: "*, ext:mcp/search"
+extensions: [builtin:mcp]
+tools: "*, ext:builtin:mcp/mcp__server__search"
 
 isolated: true                    # hermetic: built-ins only, no extensions/skills/context
 ```
@@ -377,12 +377,12 @@ A few rules the examples don't make obvious:
 
 - Tool restrictions apply to both direct calls and nested calls through codemode or `ctx.executeTool()`.
 - `extensions:` is the sole loading authority. `ext:foo` in `tools:` narrows what surfaces; it can't load `foo` on its own. Mismatches fire `extension-error:…` warnings.
-- Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:mcp/search"` exposes only `search` from `mcp`, nothing from any other extension.
-- Extension names match case-insensitively (`[Mcp]` = `[mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
-- Pi's native `mcp`, `codemode`, and `tool-search` extensions follow the same loading rules, including Pi's built-in disabling and replacement settings. The `tool-search` extension provides the `tool_search` tool.
+- Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:builtin:mcp/mcp__server__search"` exposes only `mcp__server__search` from native MCP, nothing from any other extension.
+- Extension names match case-insensitively (`[builtin:MCP]` = `[builtin:mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
+- Pi's native extensions are named `builtin:mcp`, `builtin:codemode`, and `builtin:tool-search` in `extensions:`, `exclude_extensions:`, and `ext:` selectors. Bare names such as `mcp` match third-party extensions only, not native ones. **Migration:** replace native-extension references such as `extensions: [mcp]` with `extensions: [builtin:mcp]` and `ext:mcp` with `ext:builtin:mcp`; likewise for codemode and tool-search. Tool names remain `codemode` and `tool_search`. Pi's built-in disabling and replacement settings still apply.
 - Pi resolves replacement conflicts before per-agent filtering. Excluding a third-party replacement in an agent definition does not restore the native built-in it replaced. To use the native built-in, disable the conflicting replacement in Pi settings; this affects other sessions using those settings too.
 - Native MCP is skipped with a warning when the execution directory differs from the configuration directory, as with cross-directory RPC spawns. The default native MCP loader uses the execution directory; supporting separate roots would require a custom configuration loader. Skipping prevents loading the target's `mcp.json`. This also disables global and extension-registered native MCP servers for that run. Other extensions are unaffected.
-- Native MCP selectors use full registered names, such as `ext:mcp/mcp__server__search`. For codemode-exposed tools, also load `codemode` and allow `ext:codemode`. Codemode and tool search activate according to Pi settings or MCP exposure; deferred tools are not eagerly declared.
+- Native MCP selectors use full registered names, such as `ext:builtin:mcp/mcp__server__search`. For codemode-exposed tools, also load `builtin:codemode` and allow `ext:builtin:codemode`. Codemode and tool search activate according to Pi settings or MCP exposure; deferred tools are not eagerly declared.
 - Extensions that register tools **lazily** work too. MCP-backed extensions typically can't enumerate their tools until their servers connect, so they register from `session_start` or `before_agent_start` rather than at load. Subagent scoping is re-derived as tools appear, so these surface normally — including under `ext:` selectors, which keep narrowing correctly no matter when a tool shows up.
 - Extensions bound into a subagent see **both ends** of that session's lifecycle: `session_start` when the agent starts, `session_shutdown` (reason `quit`) when its session is disposed — on quit, and when its record is evicted ~10 minutes after it finishes. Release per-session resources there; anything left armed outlives the session it belongs to. Handlers are given three seconds on quit, after which teardown proceeds regardless.
 - An installed **package** extension matches by its package short name (`@scope/pi-subagents` → `[pi-subagents]`), in addition to its path-derived name (a package whose entry is `src/index.ts` also answers to `[src]`). Prefer the package name — the path-derived one is incidental.
@@ -400,7 +400,7 @@ A few rules the examples don't make obvious:
 | `none` with `isolated: true` or `extensions: false` | `none` |
 | `none`, or only `ext:` entries, with extensions loading | `no built-ins, extension tools only` |
 
-The last two rows are separate because zero built-ins is not zero tools: `tools: none` alongside `extensions:` still surfaces every extension tool, so calling it `none` would understate what the agent can do. Note `*` doesn't enumerate extension tools either — an agent with `tools: "*, ext:mcp/search"` advertises `*`.
+The last two rows are separate because zero built-ins is not zero tools: `tools: none` alongside `extensions:` still surfaces every extension tool, so calling it `none` would understate what the agent can do. Note `*` doesn't enumerate extension tools either — an agent with `tools: "*, ext:builtin:mcp/mcp__server__search"` advertises `*`.
 
 ## Tools
 

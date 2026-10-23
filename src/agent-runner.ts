@@ -61,7 +61,7 @@ const TOOL_SCOPE_PATH = `<inline:${TOOL_SCOPE_EXTENSION}>`;
  * single-file extensions to the basename minus `.ts`/`.js`.
  */
 export function extensionCanonicalName(extPath: string): string {
-  if (extPath.startsWith("builtin:")) return extPath.slice("builtin:".length).toLowerCase();
+  if (extPath.startsWith("builtin:")) return extPath.toLowerCase();
   const base = basename(extPath);
   const name = base === "index.ts" || base === "index.js"
     ? basename(dirname(extPath))
@@ -765,7 +765,7 @@ export async function runAgent(
   });
   await runInChildSessionContext(() => loader.reload());
 
-  if (separateConfigDir && !noExtensions && !excludeNames.has("mcp") && (loadAll || keepNames.has("mcp"))) {
+  if (separateConfigDir && !noExtensions && !excludeNames.has("builtin:mcp") && (loadAll || keepNames.has("builtin:mcp"))) {
     options.onToolActivity?.({
       type: "end",
       toolName: `extension-error:native MCP is unavailable for agent "${type}" with a separate config directory; target mcp.json was not loaded`,
@@ -809,7 +809,7 @@ export async function runAgent(
   // flags path-like and "*" entries — excludes are plain names only.
   if (hasExcludes && discoveredNames) {
     for (const name of excludeNames) {
-      if (separateConfigDir && name === "mcp") continue;
+      if (separateConfigDir && name === "builtin:mcp") continue;
       if (!discoveredNames.has(name)) {
         options.onToolActivity?.({
           type: "end",

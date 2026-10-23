@@ -1707,6 +1707,17 @@ describe("agent-runner async extension tool registration", () => {
 // tools.
 
 describe("extensionCanonicalName", () => {
+  it.each(["builtin:mcp", "builtin:codemode", "builtin:tool-search"])(
+    "preserves the native identity %s and normalizes its case",
+    (name) => {
+      expect(extensionCanonicalName(name)).toBe(name);
+      expect(extensionCanonicalName(name.toUpperCase())).toBe(name);
+    },
+  );
+  it("distinguishes native builtin:mcp from an external mcp file", () => {
+    expect(extensionCanonicalName("builtin:mcp")).toBe("builtin:mcp");
+    expect(extensionCanonicalName("/x/mcp.ts")).toBe("mcp");
+  });
   it("strips .ts/.js from a single-file extension basename", () => {
     expect(extensionCanonicalName("/x/foo.ts")).toBe("foo");
     expect(extensionCanonicalName("/x/foo.js")).toBe("foo");
@@ -1737,6 +1748,14 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
   afterEach(() => {
     while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   });
+
+  it.each(["builtin:mcp", "builtin:codemode", "builtin:tool-search"])(
+    "gives %s no external-name or package alias",
+    (name) => {
+      expect(extensionCanonicalNames(name)).toEqual([name]);
+      expect(extensionCanonicalNames(name.toUpperCase())).toEqual([name]);
+    },
+  );
 
   it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
@@ -1845,6 +1864,27 @@ describe("agent-runner extension allowlist", () => {
     expect(opts.extensionsOverride).toBeUndefined();
     expect(opts.additionalExtensionPaths).toBeUndefined();
     expect(lastToolsPassed()).toContain("tool_a");
+  });
+
+  it.each([
+    ["builtin:mcp", "native_mcp_tool", "external_mcp_tool"],
+    ["mcp", "external_mcp_tool", "native_mcp_tool"],
+  ])("allowlisting %s does not select the other mcp extension", async (name, kept, dropped) => {
+    setupArrayAgent([name]);
+    withExtensions({
+      "builtin:mcp": ["native_mcp_tool"],
+      "/ext/mcp.ts": ["external_mcp_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(loaderExtensionsRef.current.extensions.map((ext) => ext.path)).toEqual([
+      name === "builtin:mcp" ? "builtin:mcp" : "/ext/mcp.ts",
+    ]);
+    expect(lastToolsPassed()).toContain(kept);
+    expect(lastToolsPassed()).not.toContain(dropped);
   });
 
   it("['mcp'] keeps only the mcp-named extension, drops others", async () => {
@@ -2027,6 +2067,27 @@ describe("agent-runner exclude_extensions", () => {
       .map((c) => c[0]?.toolName)
       .filter((n): n is string => typeof n === "string" && n.startsWith("extension-error:"));
   }
+
+  it.each([
+    ["builtin:mcp", "external_mcp_tool", "native_mcp_tool"],
+    ["mcp", "native_mcp_tool", "external_mcp_tool"],
+  ])("excluding %s leaves the other mcp extension available", async (name, kept, dropped) => {
+    setupAgent({ extensions: true, excludeExtensions: [name] });
+    withExtensions({
+      "builtin:mcp": ["native_mcp_tool"],
+      "/ext/mcp.ts": ["external_mcp_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(loaderExtensionsRef.current.extensions.map((ext) => ext.path)).toEqual([
+      name === "builtin:mcp" ? "/ext/mcp.ts" : "builtin:mcp",
+    ]);
+    expect(lastToolsPassed()).toContain(kept);
+    expect(lastToolsPassed()).not.toContain(dropped);
+  });
 
   it("extensions: true + exclude — override installed, excluded tools dropped, others kept", async () => {
     setupAgent({ extensions: true, excludeExtensions: ["notify"] });
