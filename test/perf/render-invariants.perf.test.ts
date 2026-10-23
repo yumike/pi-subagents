@@ -15,13 +15,17 @@
  * Every bound here is an upper bound, never an equality: making one of these
  * paths cheaper must not turn a test red.
  */
+import type * as PiTui from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ConversationViewer } from "../../src/ui/conversation-viewer.js";
+import { FleetList } from "../../src/ui/fleet-list.js";
+import { makeFleet, makeManager, makeSession, mountFleet, mountViewer } from "../helpers/perf-fixtures.js";
 
 /** Counters for the pi-tui leaves the viewer wraps its text with. */
-const counts = { wrap: 0, markdownNew: 0, markdownRender: 0 };
+const counts = vi.hoisted(() => ({ wrap: 0, markdownNew: 0, markdownRender: 0 }));
 
 vi.mock("@earendil-works/pi-tui", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@earendil-works/pi-tui")>();
+  const actual = await importOriginal<typeof PiTui>();
   class CountingMarkdown extends (actual.Markdown as any) {
     constructor(...args: any[]) {
       super(...args);
@@ -41,13 +45,6 @@ vi.mock("@earendil-works/pi-tui", async (importOriginal) => {
     },
   };
 });
-
-// After the mock, so the subjects bind the counting versions.
-const { AgentWidget } = await import("../../src/ui/agent-widget.js");
-const { ConversationViewer } = await import("../../src/ui/conversation-viewer.js");
-const { makeActivity, makeFleet, makeSession, mountViewer, perfTheme, perfTui } = await import(
-  "../helpers/perf-fixtures.js"
-);
 
 beforeEach(() => {
   counts.wrap = 0;
@@ -103,34 +100,21 @@ describe("ConversationViewer — cost stays linear in transcript length", () => 
   });
 });
 
-describe("AgentWidget — one frame does not rescan per agent", () => {
-  /** Renders one frame over `n` agents; returns how often the manager was asked. */
+describe("FleetView — one frame does not rescan per agent", () => {
   function listCallsPerRender(n: number): number {
     const records = makeFleet({ running: n });
-    let listAgentsCalls = 0;
-    const manager = {
-      listAgents: () => {
-        listAgentsCalls++;
-        return records;
-      },
-    } as any;
-
-    const widget = new AgentWidget(manager, makeActivity(records), () => "all", () => false, () => false);
-    let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k: string, c: any) => { factory = c; } } as any);
-    widget.update();
-    const tui = perfTui();
-    factory?.(tui, perfTheme).render(); // prime
-    listAgentsCalls = 0;
-    factory?.(tui, perfTheme).render();
-    widget.dispose?.();
-    return listAgentsCalls;
+    const manager = makeManager(records);
+    const listAgents = vi.spyOn(manager, "listAgents");
+    const fleet = mountFleet(FleetList, records, manager);
+    try {
+      listAgents.mockClear();
+      fleet.render();
+      return listAgents.mock.calls.length;
+    } finally {
+      fleet.dispose();
+    }
   }
 
-  // Today a render is exactly one scan (`update()` does the other). The bound is
-  // "a constant, and the same constant at 100 agents as at 1" — a per-agent
-  // lookup added to the row builder would break it, and collapsing the two
-  // remaining scans into one would not.
   it("asks the manager for the agent list a constant number of times", () => {
     expect(listCallsPerRender(1)).toBeLessThanOrEqual(2);
     expect(listCallsPerRender(100)).toBeLessThanOrEqual(2);

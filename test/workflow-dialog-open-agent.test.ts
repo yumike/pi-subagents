@@ -26,7 +26,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
+import { ctx, flush, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 let sessionMessages: AgentSession["messages"] = [];
 
@@ -61,6 +61,7 @@ function overlayCtx(mode: TuiMode = "regular") {
   let entryTaken = false;
   let inputHandler: Parameters<ExtensionUIContext["onTerminalInput"]>[0] | undefined;
   const context = ctx({
+    hasUI: true,
     ui: {
       notify: vi.fn(),
       setStatus: vi.fn(),
@@ -92,7 +93,7 @@ function overlayCtx(mode: TuiMode = "regular") {
           const instance = factory(tui, theme, undefined, close) as OpenOverlay["instance"];
           const resolvedOverlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
           overlays.push({ options: options ?? {}, initialOverlayOptions, resolvedOverlayOptions, instance, close });
-          options?.onHandle?.({ setHidden: (value: boolean) => hidden.push(value) } as OverlayHandle);
+          options?.onHandle?.({ setHidden: (value: boolean) => hidden.push(value) } as unknown as OverlayHandle);
         });
       }),
     },
@@ -223,6 +224,12 @@ describe("the inspector opens a workflow agent's conversation", () => {
   });
 
   it("wires the fleet to the same live settings getter and refreshes it between opens", async () => {
+    let finish: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      const session = fakeSession() as unknown as AgentSession;
+      options.onSessionCreated?.(session);
+      return new Promise(resolve => { finish = () => resolve({ responseText: "done", session, aborted: false, steered: false }); });
+    });
     sessionMessages = [{ role: "user", content: Array.from({ length: 100 }, (_, i) => `row-${i}`).join("\n"), timestamp: 0 }];
     const booted = makePi();
     const getSettings = vi.mocked(booted.pi.getSettings as ExtensionAPI["getSettings"]);
@@ -233,8 +240,9 @@ describe("the inspector opens a workflow agent's conversation", () => {
     const ui = overlayCtx("fullscreen");
     await booted.lifecycle.get("tool_execution_start")({}, ui.context);
     await booted.tools.get("Agent").execute("tc-fleet", {
-      prompt: "read the routes", description: "fleet child", subagent_type: "general-purpose", run_in_background: false,
+      prompt: "read the routes", description: "fleet child", subagent_type: "general-purpose", run_in_background: true,
     }, undefined, undefined, ui.context);
+    await flush();
     try {
       expect(getSettings).not.toHaveBeenCalled();
       expect(ui.press("\x1b[B")).toEqual({ consume: true });
@@ -257,6 +265,8 @@ describe("the inspector opens a workflow agent's conversation", () => {
       expect(getSettings).toHaveBeenCalledTimes(3);
     } finally {
       for (const overlay of [...ui.overlays].reverse()) overlay.close();
+      finish?.();
+      await flush();
     }
   });
 });

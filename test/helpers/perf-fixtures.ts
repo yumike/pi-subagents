@@ -6,7 +6,7 @@
  * (`test/perf/ab.mjs`), which copies this file into a worktree of an older
  * commit and runs the same benchmarks there. That last consumer is why the
  * builders here stay structural — plain object literals satisfying the shapes
- * `AgentWidget`, `FleetList` and `ConversationViewer` accept — rather than
+ * `FleetList` and `ConversationViewer` accept — rather than
  * importing anything from `src/`. A fixture that reached into production types
  * would stop compiling the moment it travelled to a tree where those types
  * differ, which is exactly the tree the comparison exists to measure.
@@ -23,7 +23,7 @@
  *  - Surplus constructor arguments are passed unconditionally. JavaScript
  *    ignores extra arguments, which is what lets one benchmark file run against
  *    an older tree whose constructor took fewer. Do NOT feature-detect with
- *    `AgentWidget.length`: parameters that have defaults are not counted, so it
+ *    constructor `.length`: parameters that have defaults are not counted, so it
  *    reports the wrong arity and silently measures the wrong configuration.
  */
 
@@ -41,16 +41,7 @@ export function perfTui(columns = 120, rows = 40) {
   return { terminal: { columns, rows }, requestRender: () => {} } as any;
 }
 
-/**
- * A session stub reporting live stats.
- *
- * Both halves are load-bearing. `FleetList.agentRecords()` filters on
- * `a.session`, so a record without one is invisible to the fleet list and the
- * benchmark silently measures an empty bar. And `getSessionContextPercent()`
- * reads `getSessionStats().contextUsage`, which the widget calls once per
- * running agent per frame — returning stats rather than throwing is what keeps
- * that call on the path it takes in production instead of its catch branch.
- */
+/** Context stats keep usage formatters on their normal path rather than their catch branch. */
 export function perfSession(messages: unknown[] = []) {
   return {
     messages,
@@ -98,7 +89,7 @@ export function makeRecord(i: number, overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** A fleet in the mix the widget actually renders: running, queued, finished. */
+/** A fleet mixing running, queued, and finished agents. */
 export function makeFleet(opts: FleetOptions = {}): ReturnType<typeof makeRecord>[] {
   const { running = 3, queued = 0, finished = 0 } = opts;
   const out: ReturnType<typeof makeRecord>[] = [];
@@ -109,7 +100,7 @@ export function makeFleet(opts: FleetOptions = {}): ReturnType<typeof makeRecord
   return out;
 }
 
-/** Live per-agent activity, keyed by id, as the widget and fleet list expect. */
+/** Live per-agent activity, keyed by id, as the fleet list expects. */
 export function makeActivity(records: { id: string; toolUses: number }[]): Map<string, any> {
   return new Map(
     records.map(r => [
@@ -191,48 +182,9 @@ export function makeSession(n: number) {
 
 // ---- Render harnesses ----
 
-/**
- * Drive `AgentWidget` the way pi does: capture the component factory the widget
- * registers, then render it. Returns the factory so a caller can render
- * repeatedly without paying for construction — `renderWidget()` is the
- * per-frame path, `update()` is the 80 ms-timer path, and they are separate
- * measurements.
- */
-export function mountWidget(
-  Widget: any,
-  records: unknown[],
-  opts: { mode?: string; showCost?: boolean; showModel?: boolean } = {},
-) {
-  const widget = new Widget(
-    makeManager(records),
-    makeActivity(records as { id: string; toolUses: number }[]),
-    () => opts.mode ?? "all",
-    () => opts.showCost ?? false,
-    () => opts.showModel ?? false,
-  );
-  let factory: any;
-  widget.setUICtx({
-    setStatus: () => {},
-    setWidget: (_key: string, content: any) => { factory = content; },
-  });
-  widget.update();
-  const tui = perfTui();
-  // Prime: invoking the factory once is what hands the widget its TUI handle, so
-  // `update()` afterwards takes the registered path (requestRender) it takes in
-  // production rather than the colder first-registration branch.
-  factory?.(tui, perfTheme).render();
-  return {
-    widget,
-    /** One frame. Returns the produced lines so a caller can assert on them. */
-    render: (): string[] => (factory ? factory(tui, perfTheme).render() : []),
-    update: () => widget.update(),
-    dispose: () => widget.dispose?.(),
-  };
-}
-
-/** Drive `FleetList`: same idea, but its widget renders at an explicit width. */
-export function mountFleet(FleetList: any, records: unknown[]) {
-  const fleet = new FleetList(makeManager(records), makeActivity(records as { id: string; toolUses: number }[]));
+/** Capture the FleetView widget factory and render at an explicit width. */
+export function mountFleet(FleetList: any, records: unknown[], manager = makeManager(records)) {
+  const fleet = new FleetList(manager, makeActivity(records as { id: string; toolUses: number }[]));
   let factory: any;
   fleet.setUICtx({
     setWidget: (_key: string, content: any) => { factory = content; },
@@ -243,7 +195,7 @@ export function mountFleet(FleetList: any, records: unknown[]) {
   });
   fleet.update();
   const tui = perfTui();
-  factory?.(tui, perfTheme).render(120); // prime, as above
+  factory?.(tui, perfTheme).render(120); // hands the fleet its TUI handle before measuring updates
   return {
     fleet,
     render: (width = 120): string[] => (factory ? factory(tui, perfTheme).render(width) : []),

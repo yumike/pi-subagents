@@ -14,7 +14,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 | Field | Type | Notes |
 |---|---|---|
-| `description` | string | What the agent is doing. Shown in the widget, FleetView and the completion notification |
+| `description` | string | What the agent is doing. Shown in FleetView and the completion notification |
 | `name` | string | A memorable second handle (`@auth-audit`). Slugged, never validated — anything unusable degrades rather than failing the spawn |
 | `model` | `Model` **or** `"provider/modelId"` | Strings are resolved at the RPC boundary against `ctx.modelRegistry`. `null` means inherit, not override. Resolution is fuzzy — see [Model Scope](../README.md#model-scope) |
 | `maxTurns` | number | Turn ceiling for the run |
@@ -175,7 +175,7 @@ This document has no test of its own, so it is worth knowing which claims are ac
 | Test | Level | Pins |
 |---|---|---|
 | `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings, model resolution and scope enforcement |
-| `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
+| `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live FleetView activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
 | `test/usage-events.test.ts` | Real extension/manager with a mocked runner | Per-message attribution, ownership metadata, resume, settings independence and disposal ordering |
 

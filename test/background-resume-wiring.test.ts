@@ -31,7 +31,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
-import { type AgentActivity, AgentWidget, buildInvocationTags } from "../src/ui/agent-widget.js";
+import { type AgentActivity, buildInvocationTags } from "../src/ui/agent-display.js";
 import { FleetList } from "../src/ui/fleet-list.js";
 
 function makePi() {
@@ -342,7 +342,7 @@ describe("Agent tool — background resume wiring", () => {
       const id = await spawnSettled(tools, ctx, "actual", stored);
       writeFileSync(actualPath, `---\ndescription: Actual\n${frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`}---\nWork.`);
       const resume = vi.spyOn(AgentManager.prototype, "resume");
-      const running = vi.spyOn(AgentWidget.prototype, "markRunning");
+      const fleetTimer = vi.spyOn(FleetList.prototype, "ensureTimer");
       vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options) => {
         options?.onTurnEnd?.(3);
         return { text: "continued", aborted: false, steered: false };
@@ -356,7 +356,7 @@ describe("Agent tool — background resume wiring", () => {
       expect(result.details.subagentType).toBe("actual");
       if (background) {
         expect(resultText(result)).toContain("resumed in background");
-        const activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+        const activity = (fleetTimer.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
         expect(activity.get(id)).toMatchObject({ turnCount: 3, maxTurns: expected === 0 ? undefined : expected ?? 23 });
       } else {
         expect(result.details).toMatchObject({ turnCount: 3, maxTurns: expected === 0 ? undefined : expected ?? 23 });
@@ -388,23 +388,21 @@ describe("Agent tool — background resume wiring", () => {
     const { pi, tools, lifecycle, emitted } = makePi();
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
-    const id = await spawnSettled(tools, ctx);
-    const running = vi.spyOn(AgentWidget.prototype, "markRunning");
-    const finished = vi.spyOn(AgentWidget.prototype, "markFinished");
-    const widgetTimer = vi.spyOn(AgentWidget.prototype, "ensureTimer");
     const fleetTimer = vi.spyOn(FleetList.prototype, "ensureTimer");
+    const id = await spawnSettled(tools, ctx);
+    const activity = (fleetTimer.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+    fleetTimer.mockClear();
     const fleetFinished = vi.spyOn(FleetList.prototype, "onAgentFinished");
     const onUpdate = vi.fn();
     emitted.length = 0;
-    let activity: Map<string, AgentActivity> | undefined;
     vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options) => {
-      activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
       expect(activity.get(id)).toMatchObject({ turnCount: 1, maxTurns: 8, session, toolUses: 0 });
       options?.onTurnEnd?.(4);
       options?.onToolActivity?.({ type: "start", toolName: "read" });
       expect(activity.get(id)?.activeTools.size).toBe(1);
       options?.onToolActivity?.({ type: "end", toolName: "read" });
-      expect(activity.get(id)).toMatchObject({ turnCount: 4, toolUses: 1 });
+      expect(activity.get(id)).toMatchObject({ turnCount: 4, maxTurns: 8, session, toolUses: 1 });
+      expect(activity.get(id)?.activeTools.size).toBe(0);
       if (fails) throw new Error("provider failed");
       return { text: "inline answer", aborted: false, steered: false };
     });
@@ -413,15 +411,12 @@ describe("Agent tool — background resume wiring", () => {
       resume: id, subagent_type: "general-purpose", prompt: "Continue", description: "Continue", max_turns: 8, run_in_background: false,
     }, undefined, onUpdate, ctx);
 
-    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ turnCount: 4, maxTurns: 8, toolUses: 1, status: "running" }) }));
-    expect(result.details).toMatchObject({ turnCount: 4, maxTurns: 8, toolUses: 1, status: fails ? "error" : "completed" });
+    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ turnCount: 1, maxTurns: 8, toolUses: 0, status: "running" }) }));
     expect(resultText(result)).toContain(fails ? "provider failed" : "inline answer");
-    expect(running).toHaveBeenCalledWith(id);
-    expect(widgetTimer).toHaveBeenCalled();
+    expect(result.details).toMatchObject({ turnCount: 4, maxTurns: 8, toolUses: 1, status: fails ? "error" : "completed" });
     expect(fleetTimer).toHaveBeenCalled();
-    expect(finished).toHaveBeenCalledWith(id);
     expect(fleetFinished).toHaveBeenCalledWith(id);
-    expect(activity?.has(id)).toBe(false);
+    expect(activity.has(id)).toBe(false);
     expect(emitted.filter(e => e.event === "subagents:completed" || e.event === "subagents:failed")).toEqual([]);
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
@@ -459,8 +454,7 @@ describe("Agent tool — background resume wiring", () => {
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
     const id = await spawnSettled(tools, ctx);
-    const running = vi.spyOn(AgentWidget.prototype, "markRunning");
-    const finished = vi.spyOn(AgentWidget.prototype, "markFinished");
+    const fleetTimer = vi.spyOn(FleetList.prototype, "ensureTimer");
     const fleetFinished = vi.spyOn(FleetList.prototype, "onAgentFinished");
     vi.spyOn(AgentManager.prototype, "resume").mockRejectedValueOnce(new Error("resume failed"));
 
@@ -468,9 +462,8 @@ describe("Agent tool — background resume wiring", () => {
       resume: id, subagent_type: "general-purpose", prompt: "Continue", description: "Continue", run_in_background: false,
     }, undefined, undefined, ctx)).rejects.toThrow("resume failed");
 
-    const activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+    const activity = (fleetTimer.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
     expect(activity.has(id)).toBe(false);
-    expect(finished).toHaveBeenCalledWith(id);
     expect(fleetFinished).toHaveBeenCalledWith(id);
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });

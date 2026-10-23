@@ -61,7 +61,7 @@ import {
   type WorkflowDisplayState,
   type WorkflowEntry,
 } from "../workflow/progress.js";
-import { SPINNER, type Theme } from "./agent-widget.js";
+import { SPINNER, type Theme } from "./agent-display.js";
 import {
   ASCII_GLYPHS,
   clampLine,

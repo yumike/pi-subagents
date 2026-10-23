@@ -28,6 +28,8 @@ vi.mock("../src/mention-clone.js", () => ({ runMentionClone: vi.fn() }));
 import { getDefaultMaxTurns, resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { runMentionClone } from "../src/mention-clone.js";
+import type { AgentActivity } from "../src/ui/agent-display.js";
+import { FleetList } from "../src/ui/fleet-list.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -460,41 +462,38 @@ describe("mentioning an agent that has never run", () => {
 
   });
 
-  it("shows the turn limit it will actually be held to (#181)", async () => {
-    // The spawn passes no maxTurns on purpose (see the test above), so the
-    // tracker has to resolve the same limit runAgent will enforce — otherwise
-    // the row reads `↻1` where the Agent tool would read `↻1≤9`.
+  it("tracks the effective mention turn limit in Fleet's live activity (#181)", async () => {
     const prevMax = getDefaultMaxTurns();
+    const fleetTimer = vi.spyOn(FleetList.prototype, "ensureTimer");
     try {
       const { lifecycle } = bootDirect({ defaultMaxTurns: 9 });
-      heldRun(fakeSession());
-      let factory: any;
-      const uiCtx = ctx({
-        hasUI: true,
-        ui: {
-          setStatus: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
-          onTerminalInput: vi.fn(() => vi.fn()), getEditorText: vi.fn(() => ""), custom: vi.fn(),
-          setWidget: vi.fn((key: string, content: any) => { if (key === "agents" && content) factory = content; }),
-        },
-      });
-      await lifecycle.get("session_start")({}, uiCtx);
+      const session = fakeSession();
+      heldRun(session);
+      const uiCtx = ctx({ hasUI: true });
+      uiCtx.ui.onTerminalInput = vi.fn(() => vi.fn());
 
-      await lifecycle.get("input")({ type: "input", text: "@explore go", source: "interactive" }, uiCtx);
+      const result = await lifecycle.get("input")(
+        { type: "input", text: "@explore go", source: "interactive" }, uiCtx,
+      );
       await flush();
 
-      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
-      const lines = factory({ terminal: { columns: 200 }, requestRender: vi.fn() }, theme).render().join("\n");
-      expect(lines).toContain("≤9");
+      expect(result).toEqual({ action: "handled" });
+      expect(fleetTimer).toHaveBeenCalled();
+      const activity = (fleetTimer.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+      const options = vi.mocked(runAgent).mock.calls[0][3];
+      expect(options.agentId).toBeDefined();
+      expect(activity.get(options.agentId!)).toMatchObject({ turnCount: 1, maxTurns: 9, session });
+
+      options.onTurnEnd?.(3);
+      expect(activity.get(options.agentId!)).toMatchObject({ turnCount: 3, maxTurns: 9 });
     } finally {
+      fleetTimer.mockRestore();
       setDefaultMaxTurns(prevMax);
     }
   });
 
-  it("tracks its tool activity, so the widget shows what it is doing (#181)", async () => {
-    // A mention spawn never passes through the Agent tool, which is where the
-    // activity tracker is normally created. Without one the widget and
-    // FleetView have no tool name and no turn count for the agent, so its row
-    // reads `thinking…` from start to finish.
+  it("tracks its tool activity, so FleetView shows what it is doing (#181)", async () => {
+    // Mention spawns bypass the Agent tool, but still need its activity hooks.
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 

@@ -4,19 +4,19 @@
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
  * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
- * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
+ * A viewer stays open through completion; unsuccessful runs linger for 30 seconds.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
+import { type AgentActivity, describeActivity, formatCost, type Theme } from "./agent-display.js";
 import { ConversationViewer, getConversationOverlayOptions } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -25,8 +25,8 @@ const FLEET_KEY = "fleet";
 const MAX_AGENT_ROWS = 5;
 /** Re-render cadence so elapsed/token stats tick while agents run. */
 const TICK_MS = 200;
-/** How long a finished agent lingers in the list before it drops out. */
-const FINISHED_LINGER_MS = 4000;
+const ERROR_LINGER_MS = 30_000;
+const WORKFLOW_LINGER_MS = 4000;
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
 export type FleetUICtx = {
@@ -108,6 +108,7 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
+  private selectedKey = "main";
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
@@ -168,12 +169,12 @@ export class FleetList {
 
   /** Ensure the re-render timer is running (called when an agent spawns). */
   ensureTimer(): void {
-    if (!this.timer) this.timer = setInterval(() => this.update(), TICK_MS);
+    if (this.ui && this.enabled && !this.timer) this.timer = setInterval(() => this.update(), TICK_MS);
   }
 
   /**
    * Called when an agent finishes. The viewer (if open on it) stays open so the
-   * final output remains readable, and the row lingers in the list — just refresh.
+   * final output remains readable even when the successful run leaves the panel.
    */
   onAgentFinished(_id: string): void {
     this.update();
@@ -213,7 +214,7 @@ export class FleetList {
       }
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
-      this.selectedIndex = 0;
+      this.select(0);
       return;
     }
 
@@ -237,20 +238,17 @@ export class FleetList {
   // ---- Roster ----
 
   /**
-   * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session), so Enter
-   * never dead-ends. Included: running/queued, plus the agent currently being
-   * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Pending agents with no session yet are hidden until they start.
-   * (`listAgents()` is newest-first, so we re-sort.)
+   * Pending agents stay visible before a session exists. Successful runs leave
+   * immediately unless viewed; other outcomes linger so failures are noticeable.
+   * `listAgents()` is newest-first, so re-sort for stable launch order.
    */
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && a.session && (
+      .filter(a => isTopLevelAgent(a) && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+        || (a.status !== "completed" && a.completedAt != null && now - a.completedAt < ERROR_LINGER_MS)
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
   }
@@ -271,7 +269,7 @@ export class FleetList {
     this.openWorkflow = open;
   }
 
-  /** Live runs, plus recently settled ones — the same linger the agents get. */
+  /** Live runs, plus recently settled ones. */
   private workflows(): FleetWorkflow[] {
     if (!this.workflowSource) return [];
     const now = Date.now();
@@ -279,7 +277,7 @@ export class FleetList {
       .filter(run =>
         run.status === "running"
         || run.status === "paused"
-        || (run.completedAt != null && now - run.completedAt < FINISHED_LINGER_MS)
+        || (run.completedAt != null && now - run.completedAt < WORKFLOW_LINGER_MS)
       )
       .sort((a, b) => a.startedAt - b.startedAt);
   }
@@ -297,10 +295,22 @@ export class FleetList {
     ];
   }
 
+  private entryKey(entry: FleetEntry): string {
+    return entry.kind === "agent" ? `agent:${entry.record.id}`
+      : entry.kind === "workflow" ? `workflow:${entry.workflow.id}` : "main";
+  }
+
+  private select(index: number): void {
+    const entry = this.roster()[index];
+    this.selectedIndex = entry ? index : 0;
+    this.selectedKey = entry ? this.entryKey(entry) : "main";
+  }
+
   private clampSelection(): void {
-    const max = this.roster().length - 1;
-    if (this.selectedIndex > max) this.selectedIndex = Math.max(0, max);
-    if (this.selectedIndex < 0) this.selectedIndex = 0;
+    const index = this.roster().findIndex(entry => this.entryKey(entry) === this.selectedKey);
+    this.selectedIndex = Math.max(0, index);
+    // Never open a different agent just because the selected row disappeared.
+    if (index < 0) this.selectedKey = "main";
   }
 
   // ---- Key handling ----
@@ -325,6 +335,8 @@ export class FleetList {
       return undefined;
     }
 
+    this.clampSelection();
+
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
@@ -333,7 +345,7 @@ export class FleetList {
       // render the row but refuse to move into it.
       if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
         this.active = true;
-        this.selectedIndex = 0;
+        this.select(0);
         this.update();
         return { consume: true };
       }
@@ -343,13 +355,13 @@ export class FleetList {
     // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
-      this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.select(Math.min(max, this.selectedIndex + 1));
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
-      this.selectedIndex -= 1;
+      this.select(this.selectedIndex - 1);
       this.update();
       return { consume: true };
     }
@@ -374,7 +386,7 @@ export class FleetList {
 
   private deactivate(): void {
     this.active = false;
-    this.selectedIndex = 0;
+    this.select(0);
     this.update();
   }
 
@@ -438,10 +450,7 @@ export class FleetList {
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
   private clearViewer(): void {
-    // Keep the cursor on the agent we were viewing — re-resolve by id so it
-    // still feels natural if the list reordered (an earlier agent finished)
-    // while the overlay was open. If that agent is gone, leave the index for
-    // update()'s clamp to settle.
+    // Re-resolve by identity: other rows can disappear while the viewer is open.
     const viewed = this.viewingAgentId ?? this.viewingWorkflowId;
     if (viewed !== undefined) {
       const idx = this.roster().findIndex(e =>
@@ -449,7 +458,7 @@ export class FleetList {
         : e.kind === "workflow" ? e.workflow.id === viewed
         : false,
       );
-      if (idx >= 0) this.selectedIndex = idx;
+      if (idx >= 0) this.select(idx);
     }
     this.viewerClose = undefined;
     this.viewingAgentId = undefined;
@@ -462,9 +471,8 @@ export class FleetList {
   private renderBar(width: number, theme: Theme): string[] {
     const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
     if (rows.length === 0) return [];
-    // Clamp locally so a render between a roster shrink and the next update()
-    // (e.g. on terminal resize) never loses the selection marker.
-    const sel = Math.min(this.selectedIndex, rows.length);
+    this.clampSelection();
+    const sel = this.selectedIndex;
 
     const hint = this.active
       ? "↑↓ select · enter view · esc back"
@@ -532,16 +540,28 @@ export class FleetList {
     const name = renderAgentName(record.type, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
-    const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
-    // The record, not the activity tracker — see the note in AgentWidget's
-    // running line: only the record carries a nested child's spend, and only it
-    // outlives the agent.
+    // Only the record includes nested spend and survives activity cleanup.
     const tokens = getLifetimeTotal(record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
+    const activity = this.agentActivity.get(record.id);
+    const status = record.status === "running"
+      ? activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…"
+      : record.status === "steered" ? "turn limit"
+      : record.status === "error" && record.error ? `error: ${record.error}` : record.status;
+    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  `;
+    const available = Math.max(0, width - visibleWidth(prefix) - visibleWidth(right) - 1);
+    const description = stripTerminalSequences(record.description ?? record.type).replace(/\s+/g, " ");
+    const activityText = stripTerminalSequences(status).replace(/\s+/g, " ");
+    const descriptionWidth = Math.max(0, available - Math.min(visibleWidth(activityText) + 3, Math.ceil(available / 2)));
+    const label = truncateToWidth(description, descriptionWidth);
+    const statusWidth = Math.max(0, available - visibleWidth(label) - 3);
+    const statusColor = selected ? "text" : record.status === "error" || record.status === "aborted" ? "error"
+      : record.status === "steered" || record.status === "stopped" ? "warning" : "dim";
+    const left = prefix + (selected ? theme.fg("text", label) : label)
+      + theme.fg(statusColor, ` · ${truncateToWidth(activityText, statusWidth)}`);
     return rightAlign(left, right, width);
   }
 }
