@@ -125,6 +125,8 @@ The token field is annotated with two optional signals inside parens:
 - **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
 - **`⇊N`** — number of times the session has compacted, when > 0. Stays dim; the percent's color carries urgency.
 
+Session shutdown, including reload and session replacement, releases the widget and pending completion timers. A switch cancelled before shutdown keeps them active.
+
 ### FleetView
 
 While subagents are running, a Claude Code-style navigable list renders **below** the editor:
