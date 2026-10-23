@@ -85,7 +85,7 @@ describe("tool scope through Pi's real execution pipeline", () => {
       fauxAssistantMessage([fauxToolCall("bridge", {}), fauxToolCall("blocked_direct", {})]),
       fauxAssistantMessage("done"),
     ]);
-    const ctx = { cwd, model: faux.getModel(), modelRegistry: new ModelRegistry(runtime), getSystemPrompt: () => "parent" } as ExtensionContext;
+    const ctx = { cwd, model: faux.getModel(), modelRegistry: new ModelRegistry(runtime), getSystemPrompt: () => "parent", isProjectTrusted: () => true } as ExtensionContext;
     const result = await runAgent(ctx, "scope", "go", {
       pi: { exec: async () => ({ code: 1, stdout: "", stderr: "" }) } as unknown as ExtensionAPI,
       onSessionCreated: s => { session = s; },

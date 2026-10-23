@@ -18,6 +18,7 @@ import {
   type ExtensionAPI,
   getAgentDir,
   type ModelRuntime,
+  parseArgs,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -663,6 +664,7 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  const cliArgs = parseArgs(process.argv.slice(2));
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
   // Nested tools resolved against a fresh local registry, not this shared snapshot.
@@ -799,10 +801,13 @@ export async function runAgent(
         };
 
   let toolCallScope: ReturnType<typeof installExtensionToolScope> | undefined;
+  const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted: ctx.isProjectTrusted() });
   const loader = new DefaultResourceLoader({
     cwd: configCwd,
     agentDir,
-    noExtensions,
+    settingsManager,
+    noExtensions: noExtensions || cliArgs.noExtensions === true,
+    disabledBuiltinExtensions: cliArgs.noMcp ? ["mcp"] : undefined,
     extensionFactories: [
       { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
       { name: "tool-search", factory: createToolSearchExtension(), builtin: true, replaceable: true },
@@ -825,7 +830,8 @@ export async function runAgent(
   });
   await runInChildSessionContext(() => loader.reload());
 
-  if (separateConfigDir && !noExtensions && !excludeNames.has("builtin:mcp") && (loadAll || keepNames.has("builtin:mcp"))) {
+  if (separateConfigDir && !noExtensions && !cliArgs.noExtensions && !cliArgs.noMcp
+    && !excludeNames.has("builtin:mcp") && (loadAll || keepNames.has("builtin:mcp"))) {
     options.onToolActivity?.({
       type: "end",
       toolName: `extension-error:native MCP is unavailable for agent "${type}" with a separate config directory; target mcp.json was not loaded`,
@@ -1025,7 +1031,6 @@ export async function runAgent(
     sessionExcludeTools = [...denyTools];
   }
 
-  const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   // Frontmatter wins when it says anything; otherwise the project default,
