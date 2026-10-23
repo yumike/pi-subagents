@@ -1,9 +1,11 @@
-import { Editor, type EditorComponent, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { Editor, type EditorComponent, type OverlayOptions, type ScrollViewScrollbar, type TuiMode, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord, ViewerMarkdownMode } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-widget.js";
+import type { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import {
   FleetList,
   type FleetUICtx,
@@ -84,7 +86,10 @@ interface Harness {
   /** Settle the workflow dialog the list last opened; flushes the close microtask. */
   closeWorkflowDialog: () => Promise<void>;
   /** The overlay component (a real ConversationViewer) once one is opened. */
-  overlayComponent: () => { handleInput(data: string): void } | undefined;
+  overlayComponent: () => ConversationViewer | undefined;
+  overlayOptions: () => OverlayOptions | undefined;
+  initialOverlayOptions: () => OverlayOptions | undefined;
+  lazyOverlayOptions: () => boolean;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -116,6 +121,8 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
 function harness(
   agents: AgentRecord[],
   opts: {
+    tuiMode?: TuiMode;
+    scrollbarMode?: () => ScrollViewScrollbar;
     viewerMarkdown?: () => ViewerMarkdownMode;
     onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
   } = {},
@@ -126,28 +133,40 @@ function harness(
   let opened = false;
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
-  let overlayComponent: { handleInput(data: string): void } | undefined;
-  const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  let overlayComponent: ConversationViewer | undefined;
+  let overlayOptions: OverlayOptions | undefined;
+  let initialOverlayOptions: OverlayOptions | undefined;
+  let lazyOverlayOptions = false;
+  const fakeTui = { mode: opts.tuiMode ?? "regular", requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
     notify: () => {},
-    custom: ((factory: any) => {
+    custom: ((factory: Parameters<FleetUICtx["custom"]>[0], options?: Parameters<ExtensionUIContext["custom"]>[1]) => {
       opened = true;
+      closed = false;
+      lazyOverlayOptions = typeof options?.overlayOptions === "function";
+      initialOverlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
       return new Promise<undefined>((resolve) => {
-        const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
+        const done = (r: unknown) => {
+          closed = true;
+          overlayDone = undefined;
+          overlayComponent?.dispose();
+          resolve(r as undefined);
+        };
         overlayDone = done;
         // Construct the overlay component so the controller wires viewerClose,
         // and keep it so tests can drive the real ConversationViewer's input.
-        overlayComponent = factory(fakeTui, theme, undefined, done);
+        overlayComponent = factory(fakeTui, theme, undefined, done) as ConversationViewer;
+        overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
       });
     }) as FleetUICtx["custom"],
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown);
+  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown, opts.scrollbarMode);
   fleet.setUICtx(ui);
   let workflows: FleetWorkflow[] = [];
   const openedWorkflows: string[] = [];
@@ -168,6 +187,9 @@ function harness(
     ui,
     manager,
     overlayComponent: () => overlayComponent,
+    overlayOptions: () => overlayOptions,
+    initialOverlayOptions: () => initialOverlayOptions,
+    lazyOverlayOptions: () => lazyOverlayOptions,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
@@ -572,6 +594,60 @@ describe("FleetList rendering", () => {
 });
 
 describe("FleetList overlay lifecycle", () => {
+  it.each<{ mode: TuiMode; expected: OverlayOptions }>([
+    { mode: "regular", expected: { anchor: "center", width: "90%", maxHeight: "70%" } },
+    { mode: "fullscreen", expected: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } },
+  ])("opens the viewer for the actual $mode TUI and leaves its keys alone", async ({ mode, expected }) => {
+    const h = harness([makeRecord()], { tuiMode: mode });
+    try {
+      h.press(DOWN);
+      h.press(DOWN);
+      h.press(ENTER);
+
+      expect(h.lazyOverlayOptions()).toBe(true);
+      expect(h.initialOverlayOptions()).toEqual({ anchor: "center", width: "90%", maxHeight: "70%" });
+      expect(h.overlayOptions()).toEqual(expected);
+      for (const key of [DOWN, UP, LEFT, ENTER, ESC]) expect(h.press(key)).toBeUndefined();
+      expect(h.overlayClosed()).toBe(false);
+      await h.closeOverlay();
+      expect(h.render().find(line => line.includes("Sleep then report 1"))).toContain("●");
+      expect(h.press(UP)).toEqual({ consume: true });
+      expect(h.render().find(line => line.includes("main"))).toContain("●");
+    } finally {
+      await h.closeOverlay();
+      h.fleet.dispose();
+    }
+  });
+
+  it("reads the scrollbar getter on each open, not when the fleet is constructed", async () => {
+    let mode: ScrollViewScrollbar = "auto";
+    const scrollbarMode = vi.fn(() => mode);
+    const session = {
+      ...FAKE_SESSION,
+      messages: [{ role: "user", content: Array.from({ length: 100 }, (_, i) => `row-${i}`).join("\n"), timestamp: 0 }],
+    };
+    const h = harness([makeRecord({ session: session as AgentRecord["session"] })], { tuiMode: "fullscreen", scrollbarMode });
+    try {
+      expect(scrollbarMode).not.toHaveBeenCalled();
+      h.press(DOWN);
+      h.press(DOWN);
+      for (const setting of ["always", "hidden", "auto"] as const) {
+        mode = setting;
+        h.press(ENTER);
+        const viewer = h.overlayComponent()!;
+        const hasRail = () => viewer.render(120).map(plain).some(line => /[┃│█]$/.test(line));
+        expect(hasRail()).toBe(setting === "always");
+        viewer.handleInput(UP);
+        expect(hasRail()).toBe(setting !== "hidden");
+        await h.closeOverlay();
+      }
+      expect(scrollbarMode).toHaveBeenCalledTimes(3);
+    } finally {
+      await h.closeOverlay();
+      h.fleet.dispose();
+    }
+  });
+
   it("Enter on 'main' just deactivates (no overlay)", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // active, index 0 (main)
