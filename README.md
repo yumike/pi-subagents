@@ -313,7 +313,7 @@ All fields are optional — sensible defaults for everything.
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree, or `off` to refuse one even when the caller passes `isolation: "worktree"` (frontmatter is authoritative). Workflow scripts are the exception: only their `agent()` option decides. `none`, `no`, and `false` are accepted spellings of `off` |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
-| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `max_turns` | unlimited | Max agentic turns per run before graceful shutdown, including each resume. `0` means unlimited; omit to inherit the call or default budget |
 | `persist_session` | `subagents.json` `rememberAgents` (default `true`) | Persist this subagent as a normal pi session instead of keeping the session in memory only; overrides the `rememberAgents` project default in both directions. It records its spawning session as parent, so it nests under it in `/resume`. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
 | `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd. A session outside the parent's session directory (this override, or `isolation: worktree`) is listed separately, so it shows as a root instead of nesting |
@@ -421,9 +421,9 @@ Launch a sub-agent.
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
-| `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
+| `max_turns` | number | no | Max agentic turns per run, including each resume; `0` means unlimited. Agent frontmatter takes precedence; omitted values inherit the configured or stored budget |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline |
-| `resume` | string | no | Agent ID to resume a previous session |
+| `resume` | string | no | Agent ID to resume a previous session with a fresh turn budget; uses the existing agent's type, ignoring `subagent_type` |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
@@ -552,6 +552,8 @@ Settings                                    ← max concurrency (background + fo
 - **Settings** — configure max concurrency (background and foreground), default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
+
+Every spawn and resume gets a fresh turn budget: previous conversation turns do not count against it. For top-level and nested `Agent` resumes, precedence is the existing agent type's current `max_turns` frontmatter → the call's `max_turns` → the record's stored invocation budget → the runner's type/default limit (unlimited unless configured). The supplied `subagent_type` is ignored when resuming. A live `@handle` resume follows the same precedence without a call-level override. `0` explicitly means unlimited and does not fall through to a stored or default limit.
 
 Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 

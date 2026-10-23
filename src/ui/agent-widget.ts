@@ -206,7 +206,7 @@ export function buildInvocationTags(
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground) tags.push("background");
-  if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
+  if (invocation.maxTurns != null && invocation.maxTurns > 0) tags.push(`max turns: ${invocation.maxTurns}`);
   return {
     modelName: asked(invocation.modelName, invocation.requestedModel),
     modelId: asked(invocation.modelId, invocation.requestedModel),

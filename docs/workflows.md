@@ -252,6 +252,8 @@ Any other key is rejected **by name** at the call. Note that this checks option 
 
 Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
 
+Each resume counts turns afresh and enforces the agent's turn limit with the same wrap-up warning and grace turns as a new spawn. Stopping the workflow also stops its active resumed child.
+
 ### `pipeline()` and `parallel()`
 
 ```js

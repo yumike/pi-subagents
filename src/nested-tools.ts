@@ -89,7 +89,7 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
-  resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
+  resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number; onTurnEnd?: (turnCount: number) => void }): Promise<AgentRecord | undefined>;
 }
 
 export interface NestedToolContext {
@@ -169,7 +169,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
       model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
       thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
-      max_turns: Type.Optional(Type.Number({ minimum: 1 })),
+      max_turns: Type.Optional(Type.Number({ minimum: 0 })),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
@@ -186,7 +186,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        const resumed = await context.manager.resume(params.resume, params.prompt, signal);
+        const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
+          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
+        });
         return resumed
           ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);

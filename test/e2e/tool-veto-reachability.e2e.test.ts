@@ -105,7 +105,7 @@ describe("tool scope through Pi's real execution pipeline", () => {
     expect(JSON.stringify(bridge?.content)).toContain("permission gate");
 
     faux.setResponses([fauxAssistantMessage(fauxToolCall("bridge", {})), fauxAssistantMessage("resumed")]);
-    expect((await resumeAgent(session, "again")).text).toBe("resumed");
+    expect((await resumeAgent(session, "again", { type: "scope" })).text).toBe("resumed");
     expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["allowed_late", "allowed_code", "allowed_late", "allowed_code"]);
   });
 

@@ -179,6 +179,8 @@ export interface AgentRecord {
   completedAt?: number;
   session?: AgentSession;
   abortController?: AbortController;
+  /** Removes the current caller's abort listener before the record is reused. */
+  detachParentAbort?: () => void;
   promise?: Promise<string>;
   /**
    * A caller is awaiting this agent inline (`spawnAndWait`) — what

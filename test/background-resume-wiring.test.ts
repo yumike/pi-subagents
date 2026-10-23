@@ -8,6 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -26,9 +27,12 @@ vi.mock("../src/output-file.js", async () => {
   };
 });
 
+import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { type AgentActivity, AgentWidget, buildInvocationTags } from "../src/ui/agent-widget.js";
+import { FleetList } from "../src/ui/fleet-list.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -127,13 +131,14 @@ describe("Agent tool — background resume wiring", () => {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   /** Spawn a background agent and let it settle, so it holds a resumable session. */
-  async function spawnSettled(tools: Map<string, any>, ctx: any, type = "general-purpose") {
+  async function spawnSettled(tools: Map<string, any>, ctx: any, type = "general-purpose", maxTurns?: number) {
     const res = await tools.get("Agent").execute(
       "spawn-call",
-      { prompt: "first task", description: "First task", subagent_type: type, run_in_background: true },
+      { prompt: "first task", description: "First task", subagent_type: type, run_in_background: true, max_turns: maxTurns },
       undefined,
       undefined,
       ctx,
@@ -261,6 +266,212 @@ describe("Agent tool — background resume wiring", () => {
     expect(text).toContain("still running");
     expect(text).toContain("steer_subagent");
 
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  it("accepts an unlimited zero budget in the Agent schema", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const params = { subagent_type: "general-purpose", prompt: "Continue", description: "Continue", resume: "existing", max_turns: 0 };
+    expect(Value.Check(tools.get("Agent").parameters, params)).toBe(true);
+    expect(Value.Check(tools.get("Agent").parameters, { ...params, max_turns: -1 })).toBe(false);
+    await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
+  });
+
+  describe.each([false, true])("fresh spawn budgets (background=%s)", (background) => {
+    it.each([
+      { frontmatter: undefined, explicit: 0, stored: 0, expected: 0 },
+      { frontmatter: 0, explicit: 4, stored: 0, expected: 0 },
+      { frontmatter: undefined, explicit: 7, stored: 7, expected: 7 },
+      { frontmatter: undefined, explicit: undefined, stored: undefined, expected: 23 },
+    ])("retains $frontmatter / $explicit through spawn and later resume", async ({ frontmatter, explicit, stored, expected }) => {
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+      const path = join(agentDir, "agents", "actual.md");
+      writeFileSync(path, `---\ndescription: Actual\n${frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`}---\nWork.`);
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = makeCtx(cwd);
+      const spawn = vi.spyOn(AgentManager.prototype, "spawn");
+
+      try {
+        const result = await tools.get("Agent").execute("spawn", {
+          subagent_type: "actual", prompt: "First task", description: "First task", max_turns: explicit, run_in_background: background,
+        }, undefined, undefined, ctx);
+        const manager = spawn.mock.contexts[0] as AgentManager;
+        const record = manager.getRecord(result.details.agentId)!;
+        await record.promise;
+
+        expect(runAgent).toHaveBeenCalledWith(ctx, "actual", "First task", expect.objectContaining({ maxTurns: expected }));
+        expect(record.invocation?.maxTurns).toBe(stored);
+        const budgetTags = stored === undefined || stored === 0 ? [] : [`max turns: ${stored}`];
+        expect(buildInvocationTags(record.invocation).tags.filter(tag => tag.startsWith("max turns:"))).toEqual(budgetTags);
+        expect((result.details.tags ?? []).filter((tag: string) => tag.startsWith("max turns:"))).toEqual(budgetTags);
+        if (!background) expect(result.details.maxTurns).toBe(expected === 0 ? undefined : expected);
+
+        writeFileSync(path, "---\ndescription: Actual\n---\nWork.");
+        await tools.get("Agent").execute("resume", {
+          resume: record.id, subagent_type: "actual", prompt: "Continue", description: "Continue", run_in_background: background,
+        }, undefined, undefined, ctx);
+        await record.promise;
+
+        expect(resumeAgent).toHaveBeenCalledWith(session, "Continue", expect.objectContaining({ maxTurns: stored }));
+        expect(record.invocation?.maxTurns).toBe(stored);
+      } finally {
+        await lifecycle.get("session_shutdown")?.({}, ctx);
+      }
+    });
+  });
+
+  describe.each([false, true])("resume budgets (background=%s)", (background) => {
+    it.each([
+      { frontmatter: 7, explicit: 4, stored: 11, expected: 7 },
+      { frontmatter: 7, explicit: 0, stored: 11, expected: 7 },
+      { frontmatter: 0, explicit: 4, stored: 11, expected: 0 },
+      { frontmatter: undefined, explicit: 4, stored: 11, expected: 4 },
+      { frontmatter: undefined, explicit: 0, stored: 11, expected: 0 },
+      { frontmatter: undefined, explicit: undefined, stored: 11, expected: 11 },
+      { frontmatter: undefined, explicit: undefined, stored: undefined, expected: undefined },
+    ])("actual type precedence: $frontmatter / $explicit / $stored", async ({ frontmatter, explicit, stored, expected }) => {
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+      const actualPath = join(agentDir, "agents", "actual.md");
+      writeFileSync(actualPath, "---\ndescription: Actual\n---\nWork.");
+      writeFileSync(join(agentDir, "agents", "ignored.md"), `---\ndescription: Ignored\nmax_turns: 97\nrun_in_background: ${!background}\n---\nOther.`);
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = makeCtx(cwd);
+      const id = await spawnSettled(tools, ctx, "actual", stored);
+      writeFileSync(actualPath, `---\ndescription: Actual\n${frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`}---\nWork.`);
+      const resume = vi.spyOn(AgentManager.prototype, "resume");
+      const running = vi.spyOn(AgentWidget.prototype, "markRunning");
+      vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options) => {
+        options?.onTurnEnd?.(3);
+        return { text: "continued", aborted: false, steered: false };
+      });
+
+      const result = await tools.get("Agent").execute("resume", {
+        resume: id, subagent_type: "ignored", prompt: "Continue", description: "Continue", max_turns: explicit, run_in_background: background,
+      }, undefined, undefined, ctx);
+
+      expect(resume).toHaveBeenCalledWith(id, "Continue", undefined, expect.objectContaining({ maxTurns: expected, onTurnEnd: expect.any(Function) }));
+      expect(result.details.subagentType).toBe("actual");
+      if (background) {
+        expect(resultText(result)).toContain("resumed in background");
+        const activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+        expect(activity.get(id)).toMatchObject({ turnCount: 3, maxTurns: expected === 0 ? undefined : expected ?? 23 });
+      } else {
+        expect(result.details).toMatchObject({ turnCount: 3, maxTurns: expected === 0 ? undefined : expected ?? 23 });
+      }
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    });
+  });
+
+  it.each([undefined, 0, 5])("live mentions reload the actual type and retain its stored budget (%s)", async (frontmatter) => {
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+    const path = join(agentDir, "agents", "actual.md");
+    writeFileSync(path, "---\ndescription: Actual\n---\nWork.");
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    ctx.mode = "tui";
+    const id = await spawnSettled(tools, ctx, "actual", 11);
+    writeFileSync(path, `---\ndescription: Actual\n${frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`}---\nWork.`);
+    const resume = vi.spyOn(AgentManager.prototype, "resume");
+
+    const result = await lifecycle.get("input")({ source: "interactive", text: "@actual Continue" }, ctx);
+
+    expect(result).toEqual({ action: "handled" });
+    expect(resume).toHaveBeenCalledWith(id, "Continue", undefined, expect.objectContaining({ isBackground: true, maxTurns: frontmatter ?? 11, onTurnEnd: expect.any(Function) }));
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  it.each([false, true])("tracks inline progress and cleans up on completion/error (%s)", async (fails) => {
+    const { pi, tools, lifecycle, emitted } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+    const running = vi.spyOn(AgentWidget.prototype, "markRunning");
+    const finished = vi.spyOn(AgentWidget.prototype, "markFinished");
+    const widgetTimer = vi.spyOn(AgentWidget.prototype, "ensureTimer");
+    const fleetTimer = vi.spyOn(FleetList.prototype, "ensureTimer");
+    const fleetFinished = vi.spyOn(FleetList.prototype, "onAgentFinished");
+    const onUpdate = vi.fn();
+    emitted.length = 0;
+    let activity: Map<string, AgentActivity> | undefined;
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options) => {
+      activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+      expect(activity.get(id)).toMatchObject({ turnCount: 1, maxTurns: 8, session, toolUses: 0 });
+      options?.onTurnEnd?.(4);
+      options?.onToolActivity?.({ type: "start", toolName: "read" });
+      expect(activity.get(id)?.activeTools.size).toBe(1);
+      options?.onToolActivity?.({ type: "end", toolName: "read" });
+      expect(activity.get(id)).toMatchObject({ turnCount: 4, toolUses: 1 });
+      if (fails) throw new Error("provider failed");
+      return { text: "inline answer", aborted: false, steered: false };
+    });
+
+    const result = await tools.get("Agent").execute("resume", {
+      resume: id, subagent_type: "general-purpose", prompt: "Continue", description: "Continue", max_turns: 8, run_in_background: false,
+    }, undefined, onUpdate, ctx);
+
+    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ turnCount: 4, maxTurns: 8, toolUses: 1, status: "running" }) }));
+    expect(result.details).toMatchObject({ turnCount: 4, maxTurns: 8, toolUses: 1, status: fails ? "error" : "completed" });
+    expect(resultText(result)).toContain(fails ? "provider failed" : "inline answer");
+    expect(running).toHaveBeenCalledWith(id);
+    expect(widgetTimer).toHaveBeenCalled();
+    expect(fleetTimer).toHaveBeenCalled();
+    expect(finished).toHaveBeenCalledWith(id);
+    expect(fleetFinished).toHaveBeenCalledWith(id);
+    expect(activity?.has(id)).toBe(false);
+    expect(emitted.filter(e => e.event === "subagents:completed" || e.event === "subagents:failed")).toEqual([]);
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  it.each([
+    { status: "steered", note: " (wrapped up at the turn limit — everything the agent produced is above; the task may be unfinished)" },
+    { status: "aborted", note: " (aborted at the turn limit — everything the agent produced is above; the task is unfinished)" },
+    { status: "stopped", note: " (STOPPED BY THE USER — everything the agent produced is above; the task is unfinished)" },
+    { status: "completed", note: "" },
+  ])("returns the inline $status outcome to the model after its output", async ({ status, note }) => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+    const toolAbort = new AbortController();
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      if (status === "stopped") toolAbort.abort();
+      return { text: " \ninline answer\n ", aborted: status === "aborted", steered: status === "steered" };
+    });
+
+    try {
+      const result = await tools.get("Agent").execute("resume", {
+        resume: id, subagent_type: "general-purpose", prompt: "Continue", description: "Continue", run_in_background: false,
+      }, toolAbort.signal, undefined, ctx);
+
+      expect(resultText(result)).toBe(`inline answer${note}`);
+      expect(result.details.status).toBe(status);
+    } finally {
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    }
+  });
+
+  it("cleans up inline activity even when manager.resume rejects", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+    const running = vi.spyOn(AgentWidget.prototype, "markRunning");
+    const finished = vi.spyOn(AgentWidget.prototype, "markFinished");
+    const fleetFinished = vi.spyOn(FleetList.prototype, "onAgentFinished");
+    vi.spyOn(AgentManager.prototype, "resume").mockRejectedValueOnce(new Error("resume failed"));
+
+    await expect(tools.get("Agent").execute("resume", {
+      resume: id, subagent_type: "general-purpose", prompt: "Continue", description: "Continue", run_in_background: false,
+    }, undefined, undefined, ctx)).rejects.toThrow("resume failed");
+
+    const activity = (running.mock.contexts[0] as unknown as { agentActivity: Map<string, AgentActivity> }).agentActivity;
+    expect(activity.has(id)).toBe(false);
+    expect(finished).toHaveBeenCalledWith(id);
+    expect(fleetFinished).toHaveBeenCalledWith(id);
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
 

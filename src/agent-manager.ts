@@ -305,6 +305,10 @@ interface SpawnOptions {
 }
 
 interface ResumeOptions {
+  /** Per-resume budget; omitted uses the stored invocation, then type/project defaults. Zero is unlimited. */
+  maxTurns?: number;
+  /** Count since this resume prompt, not the session's lifetime. */
+  onTurnEnd?: (turnCount: number) => void;
   /**
    * Run the resumed turn detached in the background: return immediately with
    * the record still "running" (or "queued" at the concurrency limit) and
@@ -588,10 +592,7 @@ export class AgentManager {
    * an aborted signal, so a `spawnAndWait` on it would wait forever — pi has no
    * tool-execution timeout to bail it out.
    *
-   * The listener is left in place when the agent starts. `startAgent` adds its
-   * own, so both fire on a later abort, but `abort()` on an already-stopped
-   * record is a no-op — so detaching would only be tidiness, and tidiness the
-   * `abortAll`/`dispose` paths could not offer anyway.
+   * Starting replaces this listener; it must not survive into a later resume.
    */
   private armQueuedAbort(id: string, signal?: AbortSignal): boolean {
     if (signal === undefined) return true;
@@ -603,8 +604,26 @@ export class AgentManager {
       }
       return false;
     }
-    signal.addEventListener("abort", () => this.abort(id), { once: true });
+    const record = this.agents.get(id);
+    if (record) this.armParentAbort(record, signal);
     return true;
+  }
+
+  private armParentAbort(record: AgentRecord, signal?: AbortSignal): void {
+    this.detachParentAbort(record);
+    if (!signal) return;
+    if (signal.aborted) {
+      this.abort(record.id);
+      return;
+    }
+    const onParentAbort = () => this.abort(record.id);
+    signal.addEventListener("abort", onParentAbort, { once: true });
+    record.detachParentAbort = () => signal.removeEventListener("abort", onParentAbort);
+  }
+
+  private detachParentAbort(record: AgentRecord): void {
+    record.detachParentAbort?.();
+    record.detachParentAbort = undefined;
   }
 
   /**
@@ -624,6 +643,7 @@ export class AgentManager {
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); },
       (err) => {
+        this.detachParentAbort(record);
         this.startups.delete(id);
         if (queuedPool !== undefined) {
           // Mirrors settleRun: an inline caller gets this failure as a throw
@@ -741,6 +761,7 @@ export class AgentManager {
       // burn tokens on work nobody is waiting for: discard the fresh (and by
       // definition unchanged) worktree instead.
       if (record.status !== "running") {
+        this.detachParentAbort(record);
         releaseSlot();
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
         this.drainQueue();
@@ -750,20 +771,7 @@ export class AgentManager {
 
     this.onStart?.(record);
 
-    // Wire parent abort signal to stop the subagent when the parent is interrupted
-    let detachParentSignal: (() => void) | undefined;
-    if (options.signal) {
-      // A queued spawn can start minutes after the caller handed us its signal,
-      // by which time it may already be aborted — and `addEventListener` would
-      // never fire, leaving a child the parent can no longer reach.
-      if (options.signal.aborted) this.abort(id);
-      else {
-        const onParentAbort = () => this.abort(id);
-        options.signal.addEventListener("abort", onParentAbort, { once: true });
-        detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
-      }
-    }
-    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+    this.armParentAbort(record, options.signal);
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -854,30 +862,15 @@ export class AgentManager {
       },
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          // Precedence: a hard abort keeps "aborted"; then a failed final turn
-          // (provider error that pi resolved instead of rejecting, #144) is an
-          // honest "error" — not a completion with an empty or stale result.
-          if (aborted) {
-            record.status = "aborted";
-          } else if (failure) {
-            record.status = "error";
-            record.error = failure;
-          } else {
-            record.status = steered ? "steered" : "completed";
-          }
-        }
-        record.result = responseText;
+        this.settleOutcome(record, { text: responseText, aborted, steered, failure });
         // Kept beside `result`, never inside it: `result` is prose meant for a
         // reader — it is previewed, transcribed, and appended to below — while
         // this is a machine-readable payload one caller asked for by schema.
         record.structuredJson = structuredJson;
         record.structuredRetried = structuredRetried;
         record.session = session;
-        record.completedAt ??= Date.now();
 
-        detach();
+        this.detachParentAbort(record);
 
         // Final flush of streaming output file
         if (record.outputCleanup) {
@@ -922,7 +915,7 @@ export class AgentManager {
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
 
-        detach();
+        this.detachParentAbort(record);
 
         // Final flush of streaming output file on error
         if (record.outputCleanup) {
@@ -1119,6 +1112,8 @@ export class AgentManager {
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+    // Replacing a live run's controller would leave that run unreachable by stop.
+    if (record.status === "running" || record.status === "queued") return undefined;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1127,17 +1122,6 @@ export class AgentManager {
     // returned before its background branch, and resume() only ever awaited
     // inline), so a resumed agent always blocked the caller until it finished.
     if (options?.isBackground) {
-      // Never re-enter a run that is still in flight. Detaching means the caller
-      // gets control back while the record stays "running", so nothing stops the
-      // model from resuming the same agent again. Starting a second run would
-      // overwrite record.abortController — orphaning the live run beyond the
-      // reach of `/agents` stop and abortAll() — double-count the pool slot, and
-      // then reject from session.prompt() with "Agent is already processing",
-      // whose settle path would abort the LIVE run's children and report a
-      // failure for a run that is still going. Refuse instead, leaving the
-      // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
-
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
@@ -1179,9 +1163,15 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    const abortController = new AbortController();
+    record.abortController = abortController;
+    this.armParentAbort(record, signal);
 
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
+      this.settleOutcome(record, await resumeAgent(record.session, prompt, {
+        type: record.type,
+        maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
+        onTurnEnd: options?.onTurnEnd,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
@@ -1196,25 +1186,43 @@ export class AgentManager {
           this.onCompact?.(record, info);
           options?.onCompaction?.(info);
         },
-        signal,
-      });
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
-      record.result = text;
-      record.completedAt = Date.now();
+        signal: abortController.signal,
+      }));
     } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+      this.failResume(record, err);
+    } finally {
+      this.detachParentAbort(record);
+      this.abortOwnedChildren(id);
     }
 
-    // Same contract as the spawn settle paths: children spawned during the
-    // resumed turn must not outlive it — nothing else can see or reach them.
-    this.abortOwnedChildren(id);
-
     return record;
+  }
+
+  /** External stop takes precedence over turn limits and provider failures. */
+  private settleOutcome(
+    record: AgentRecord,
+    { text, failure, aborted, steered }: Awaited<ReturnType<typeof resumeAgent>>,
+  ): void {
+    if (record.status !== "stopped") {
+      if (aborted) {
+        record.status = "aborted";
+      } else if (failure) {
+        record.status = "error";
+        record.error = failure;
+      } else {
+        record.status = steered ? "steered" : "completed";
+      }
+    }
+    record.result = text;
+    record.completedAt ??= Date.now();
+  }
+
+  private failResume(record: AgentRecord, err: unknown): void {
+    if (record.status !== "stopped") {
+      record.status = "error";
+      record.error = err instanceof Error ? err.message : String(err);
+    }
+    record.completedAt ??= Date.now();
   }
 
   /**
@@ -1242,24 +1250,15 @@ export class AgentManager {
     // than the previous one's settled controller.
     const abortController = new AbortController();
     record.abortController = abortController;
-    // Optional, and NOT what the Agent tool passes for a detached resume: a
-    // parent signal aborts on the parent's own interrupt (user Esc), which is
-    // right for a foreground run whose result the caller is awaiting, and wrong
-    // for a detached one — background spawns omit it for exactly this reason.
-    let detachParentSignal: (() => void) | undefined;
-    if (parentSignal) {
-      const onParentAbort = () => this.abort(id);
-      parentSignal.addEventListener("abort", onParentAbort, { once: true });
-      detachParentSignal = () => parentSignal.removeEventListener("abort", onParentAbort);
-    }
+    // The Agent tool omits its signal for detached resumes, which must survive parent Esc.
+    this.armParentAbort(record, parentSignal);
 
     // Per-run side effects (output streaming) — see ResumeOptions.onStarted.
     // After the record is in its running shape, before the run is kicked off.
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
 
     const settle = () => {
-      detachParentSignal?.();
-      detachParentSignal = undefined;
+      this.detachParentAbort(record);
       // Final flush of streaming output file
       if (record.outputCleanup) {
         try { record.outputCleanup(); } catch { /* ignore */ }
@@ -1273,6 +1272,9 @@ export class AgentManager {
     };
 
     const promise = resumeAgent(record.session, prompt, {
+      type: record.type,
+      maxTurns: options.maxTurns ?? record.invocation?.maxTurns,
+      onTurnEnd: options.onTurnEnd,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1289,25 +1291,13 @@ export class AgentManager {
       },
       signal: abortController.signal,
     })
-      .then(({ text, failure }) => {
-        // Don't overwrite status if externally stopped via abort().
-        if (record.status !== "stopped") {
-          // Same contract as the spawn path (#144): a failed final turn is an
-          // error, not a completion — but the resumed text stays available.
-          record.status = failure ? "error" : "completed";
-          if (failure) record.error = failure;
-        }
-        record.result = text;
-        record.completedAt ??= Date.now();
+      .then((outcome) => {
+        this.settleOutcome(record, outcome);
         settle();
-        return text;
+        return outcome.text;
       })
       .catch((err) => {
-        if (record.status !== "stopped") {
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-        }
-        record.completedAt ??= Date.now();
+        this.failResume(record, err);
         settle();
         return "";
       });
@@ -1419,6 +1409,7 @@ export class AgentManager {
     // and no onComplete, matching what a queued background abort has always
     // done; a blocking caller learns of the stop from its own tool result.
     if (record.status === "queued") {
+      this.detachParentAbort(record);
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
@@ -1426,6 +1417,7 @@ export class AgentManager {
     }
 
     if (record.status !== "running") return false;
+    this.detachParentAbort(record);
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
@@ -1434,6 +1426,7 @@ export class AgentManager {
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    this.detachParentAbort(record);
     this.tombstone(record);
     const session = record.session;
     // Detached before the shutdown starts, so the record leaves the map at once and
@@ -1518,6 +1511,7 @@ export class AgentManager {
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
       if (record) {
+        this.detachParentAbort(record);
         record.status = "stopped";
         record.completedAt = Date.now();
         count++;
@@ -1527,6 +1521,7 @@ export class AgentManager {
     // Abort running agents
     for (const record of this.agents.values()) {
       if (record.status === "running") {
+        this.detachParentAbort(record);
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
@@ -1566,7 +1561,10 @@ export class AgentManager {
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
-    const sessions = [...this.agents.values()].map(record => record.session);
+    const sessions = [...this.agents.values()].map(record => {
+      this.detachParentAbort(record);
+      return record.session;
+    });
     this.agents.clear();
     this.startups.clear();
     if (pi) {
