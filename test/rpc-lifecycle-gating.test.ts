@@ -243,7 +243,8 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
         { fg: (_color, text) => text, bold: text => text },
       ).render(200).join("\n");
       expect(lines).toContain("general-purpose");
-      expect(lines).toContain("thinking…");
+      expect(lines).not.toContain("thinking…");
+      expect(lines).toMatch(/general-purpose\s+\d+s · ↓/);
       expect(lines).not.toContain("undefined");
     } finally { await lifecycle.get("session_shutdown")(); }
   });

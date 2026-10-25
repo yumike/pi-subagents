@@ -14,6 +14,7 @@
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, describeActivity, formatCost, type Theme } from "./agent-display.js";
@@ -547,21 +548,32 @@ export class FleetList {
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     const activity = this.agentActivity.get(record.id);
+    let responseText = activity?.responseText ?? "";
+    if (record.status === "running" && !activity?.activeTools.size && !responseText.trim()) {
+      const messages = record.session?.messages ?? [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i];
+        if (message.role !== "assistant") continue;
+        const text = extractText(message.content);
+        if (text.trim()) { responseText = text; break; }
+      }
+    }
     const status = record.status === "running"
-      ? activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…"
+      ? activity?.activeTools.size || responseText.trim()
+        ? describeActivity(activity?.activeTools ?? new Map(), responseText) : ""
       : record.status === "steered" ? "turn limit"
       : record.status === "error" && record.error ? `error: ${record.error}` : record.status;
     const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  `;
     const available = Math.max(0, width - visibleWidth(prefix) - visibleWidth(right) - 1);
     const description = stripTerminalSequences(record.description ?? record.type).replace(/\s+/g, " ");
     const activityText = stripTerminalSequences(status).replace(/\s+/g, " ");
-    const descriptionWidth = Math.max(0, available - Math.min(visibleWidth(activityText) + 3, Math.ceil(available / 2)));
+    const descriptionWidth = Math.max(0, available - (activityText ? Math.min(visibleWidth(activityText) + 3, Math.ceil(available / 2)) : 0));
     const label = truncateToWidth(description, descriptionWidth);
     const statusWidth = Math.max(0, available - visibleWidth(label) - 3);
     const statusColor = selected ? "text" : record.status === "error" || record.status === "aborted" ? "error"
       : record.status === "steered" || record.status === "stopped" ? "warning" : "dim";
     const left = prefix + (selected ? theme.fg("text", label) : label)
-      + theme.fg(statusColor, ` · ${truncateToWidth(activityText, statusWidth)}`);
+      + (activityText ? theme.fg(statusColor, ` · ${truncateToWidth(activityText, statusWidth)}`) : "");
     return rightAlign(left, right, width);
   }
 }

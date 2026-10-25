@@ -112,6 +112,8 @@ Session shutdown, including reload and session replacement, releases FleetView a
 
 Each top-level agent occupies one line with its status, description, current activity, elapsed time and token count. Agents are ordered earliest-launched first. Queued and sessionless agents are shown immediately; `Enter` on one gives an informational message until its session is ready. The panel shows at most five agent/workflow rows plus `main`, with overflow indicators when more are available. A blank row separates the panel from the footer.
 
+Active tools take priority in the activity preview. Between tool calls, it shows the current response text or a snippet of the latest nonempty assistant message still in the session history, including on resume. Before any assistant text exists, the preview stays empty; there is no `thinking…` placeholder. Reasoning blocks, user messages and tool results are not used as previews.
+
 ```text
   esc to interrupt · ← for agents · ↓ to manage
 
