@@ -804,7 +804,7 @@ describe("FleetList single-panel monitoring", () => {
     } finally { h.fleet.dispose(); vi.useRealTimers(); }
   });
 
-  it("updates tool activity, response preview and thinking in the same agent row", () => {
+  it("updates tool activity and response preview without a thinking placeholder", () => {
     const activity: AgentActivity = { activeTools: new Map([["call", "read"]]), responseText: "", toolUses: 1, turnCount: 1 };
     const h = harness([makeRecord()], { activity: new Map([["a1", activity]]) });
     try {
@@ -818,7 +818,65 @@ describe("FleetList single-panel monitoring", () => {
       expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("Checking the result");
       expect(rows().join("\n")).not.toContain("More details");
       activity.responseText = "";
+      const idle = rows().find(line => line.includes("Sleep then report 1"))!;
+      expect(idle).not.toContain("thinking…");
+      expect(idle).toMatch(/Sleep then report 1\s+\d+s · ↓/);
+      activity.responseText = "thinking…";
       expect(rows().find(line => line.includes("Sleep then report 1"))).toContain("thinking…");
+    } finally { h.fleet.dispose(); }
+  });
+
+  it.each([false, true])("uses the latest nonempty assistant text while idle (tracker=%s)", tracked => {
+    const messages = [
+      { role: "assistant", content: [{ type: "text", text: "Old answer" }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: "Latest useful answer\nMore details" }] },
+      { role: "user", content: "User instruction" },
+      { role: "toolResult", content: [{ type: "text", text: "Tool output" }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "New private reasoning" }, { type: "toolCall", name: "read", id: "call", arguments: {} }] },
+      { role: "assistant", content: [{ type: "text", text: " \n\t" }] },
+    ];
+    const activity: AgentActivity = { activeTools: new Map(), responseText: " \n", toolUses: 0, turnCount: 1 };
+    const h = harness([makeRecord({ session: { ...FAKE_SESSION, messages } as unknown as AgentRecord["session"] })], {
+      activity: tracked ? new Map([["a1", activity]]) : new Map(),
+    });
+    try {
+      const row = h.render(240).map(plain).find(line => line.includes("Sleep then report 1"))!;
+      expect(row).toContain("Latest useful answer");
+      for (const hidden of ["Old answer", "private reasoning", "User instruction", "Tool output", "More details", "thinking…"]) expect(row).not.toContain(hidden);
+      messages.push({ role: "assistant", content: [{ type: "text", text: "New useful answer" }] });
+      expect(h.render(240).map(plain).join("\n")).toContain("New useful answer");
+      if (tracked) {
+        activity.activeTools.set("call", "read");
+        const busy = h.render(240).map(plain).join("\n");
+        expect(busy).toContain("reading…");
+        expect(busy).not.toContain("New useful answer");
+        activity.activeTools.clear();
+        expect(h.render(240).map(plain).join("\n")).toContain("New useful answer");
+        activity.responseText = "Streaming answer";
+        expect(h.render(240).map(plain).join("\n")).toContain("Streaming answer");
+        expect(h.render(240).map(plain).join("\n")).not.toContain("New useful answer");
+      }
+    } finally { h.fleet.dispose(); }
+  });
+
+  it.each([false, true])("omits idle activity and its separator when no assistant text exists (tracker=%s)", tracked => {
+    const description = "A useful task description";
+    const messages = [
+      { role: "user", content: "User instruction" },
+      { role: "assistant", content: [{ type: "thinking", thinking: "private reasoning" }] },
+      { role: "toolResult", content: [{ type: "text", text: "Tool output" }] },
+    ];
+    const h = harness([makeRecord({ description, session: { ...FAKE_SESSION, messages } as unknown as AgentRecord["session"] })], {
+      activity: tracked ? new Map([["a1", { activeTools: new Map(), responseText: "", toolUses: 0, turnCount: 1 }]]) : new Map(),
+      renderTheme: { fg: (_color, text) => text, bold: text => text },
+    });
+    try {
+      const width = visibleWidth(`  ○ ${getDisplayName("general-purpose")}  ${description} 0s · ↓ 13.1k tokens`);
+      const row = h.render(width).find(line => line.includes(description))!;
+      expect(row).toBeDefined();
+      expect(row).toMatch(/description\s+\d+s · ↓ 13.1k tokens$/);
+      expect(row).not.toContain("thinking");
+      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     } finally { h.fleet.dispose(); }
   });
 
@@ -874,14 +932,17 @@ describe("FleetList single-panel monitoring", () => {
   });
 
   it("shows a resumed agent again after a successful completion", () => {
-    const record = makeRecord({ status: "completed", completedAt: Date.now() });
+    const record = makeRecord({
+      status: "completed", completedAt: Date.now(),
+      session: { ...FAKE_SESSION, messages: [{ role: "assistant", content: [{ type: "text", text: "Previous answer" }] }] } as unknown as AgentRecord["session"],
+    });
     const h = harness([record]);
     try {
       expect(h.render()).toEqual([]);
       record.status = "running";
       record.completedAt = undefined;
       h.fleet.update();
-      expect(h.render(240).map(plain).join("\n")).toContain("thinking…");
+      expect(h.render(240).map(plain).join("\n")).toContain("Previous answer");
     } finally { h.fleet.dispose(); }
   });
 
