@@ -172,6 +172,16 @@ describe("toolDescriptionMode", () => {
     }
   });
 
+  it("guides model selection by delegated task rather than parent model", () => {
+    const props = setup().get("Agent").parameters.properties;
+    expect(props.model.description).toMatch(/task's complexity, required capabilities, and cost\/latency trade-offs.*not merely the parent's model/);
+  });
+
+  it("guides reasoning independently of parent effort", () => {
+    const props = setup().get("Agent").parameters.properties;
+    expect(props.thinking.description).toMatch(/independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification/);
+  });
+
   it("custom mode renders the project template with placeholders substituted", () => {
     const tools = setup({ toolDescriptionMode: "custom" }, () => {
       writeFileSync(

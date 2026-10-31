@@ -415,7 +415,7 @@ The last two rows are separate because zero built-ins is not zero tools: `tools:
 
 ### `Agent`
 
-Launch a sub-agent.
+Launch a sub-agent. Choose `model` for the delegated task's complexity, required capabilities, and cost/latency trade-offs, not merely to match the parent. Choose `thinking` independently: lower for bounded mechanical work, higher for difficult analysis or verification. Both are optional; omitted values inherit the agent's configuration, then the parent's. Agent-file model and thinking pins take precedence.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
