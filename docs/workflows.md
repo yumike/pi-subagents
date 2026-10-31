@@ -246,6 +246,8 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 | `resume` | string | Continue the child that ran under that label instead of starting fresh |
 | `schema` | object | A JSON Schema with an object root. Resolves to the validated object instead of text |
 
+Choose `model` for each delegated task's complexity, required capabilities, and cost/latency trade-offs. Omit when the inherited model is appropriate; do not assume every stage needs the parent's model. Choose `effort` independently for each stage: lower for bounded mechanical work, higher for difficult analysis or verification. Both options are optional; omitted values inherit the agent definition's configuration, then the parent's.
+
 An agent file's `isolated:` setting does apply to workflow children: `true` disables extensions, skills, `ext:` selectors and nested delegation. It is distinct from filesystem `isolation` and is not a script option.
 
 Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to `general-purpose` silently.

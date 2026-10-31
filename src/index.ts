@@ -1617,12 +1617,12 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Model for this delegated task. Choose based on the task\'s complexity, required capabilities, and cost/latency trade-offs — not merely the parent\'s model. Accepts "provider/modelId" or a fuzzy name. If omitted, inherits the configured agent model or the parent\'s model. Agent-file model pins take precedence.',
         }),
       ),
       thinking: Type.Optional(
         Type.String({
-          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
+          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Reasoning effort for this delegated task. Choose independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification. If omitted, inherits the agent's configured effort or the parent's. Agent-file thinking pins take precedence.`,
         }),
       ),
       max_turns: Type.Optional(

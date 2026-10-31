@@ -92,8 +92,16 @@ describe("the agent() contract it documents", () => {
     expect(RESUME_EXCLUSIONS.length).toBeGreaterThan(1);
   });
 
+  it("guides per-task model selection rather than always inheriting", () => {
+    expect(description).toMatch(/opts\.model[^\n]*task's complexity, required capabilities, and cost\/latency trade-offs\.[^\n]*do not assume every stage needs the parent's model/);
+  });
+
+  it("guides reasoning independently for each stage", () => {
+    expect(description).toMatch(/opts\.effort[^\n]*independently for each stage: lower for bounded mechanical work, higher for difficult analysis or verification/);
+  });
+
   it("offers every reasoning effort the runtime has, and no other", () => {
-    const listed = description.match(/reasoning effort for this agent call \(([^)]*)\)/)?.[1] ?? "";
+    const listed = description.match(/opts\.effort[^()]*\(([^)]*)\)/)?.[1] ?? "";
     const quoted = [...listed.matchAll(/'(\w+)'/g)].map(m => m[1]);
     expect(quoted).toEqual(EFFORT_LEVELS);
   });
