@@ -22,6 +22,7 @@ import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
+import { type CompletionMessage, CompletionOutbox } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
@@ -439,9 +440,30 @@ export default function (pi: ExtensionAPI) {
   }
   const pendingUsage = new PendingUsagePool();
 
-  // ---- Cancellable pending notifications ----
-  // Holds notifications briefly so get_subagent_result can cancel them
-  // before they reach pi.sendMessage (fire-and-forget).
+  let currentCtx: ExtensionContext | undefined;
+  const completionOutbox = new CompletionOutbox(
+    () => currentCtx?.isIdle() ?? false,
+    message => pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true }),
+  );
+
+  pi.on("before_agent_start", (_event, ctx) => {
+    currentCtx = ctx;
+    completionOutbox.start();
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    currentCtx = ctx;
+    completionOutbox.start();
+  });
+  pi.on("agent_before_settle", (event, ctx) => {
+    currentCtx = ctx;
+    return completionOutbox.beforeSettle(event);
+  });
+  pi.on("agent_settled", (event, ctx) => {
+    currentCtx = ctx;
+    completionOutbox.settled(event.aborted);
+  });
+
+  // ---- Cancellable pending workflow notifications ----
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 200;
   // A queued result wait must observe completion before its held notification
@@ -457,6 +479,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function cancelNudge(key: string) {
+    completionOutbox.cancel(key);
     const timer = pendingNudges.get(key);
     if (timer != null) {
       clearTimeout(timer);
@@ -465,24 +488,44 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Individual nudge helper (async join mode) ----
-  function emitIndividualNudge(record: AgentRecord) {
-    if (record.resultConsumed) return;  // re-check at send time
+  const completionRuns = new WeakMap<AgentRecord, object>();
+
+  function snapshotCompletion(record: AgentRecord): AgentRecord {
+    const snapshot = { ...record };
+    const run = completionRuns.get(record) ?? {};
+    completionRuns.set(record, run);
+    completionRuns.set(snapshot, run);
+    return snapshot;
+  }
+
+  function unreadCompletion(snapshot: AgentRecord): AgentRecord | undefined {
+    const record = manager.getRecord(snapshot.id);
+    // GroupJoin holds snapshots too: a resumed record must not revive an old result.
+    if (!record || record.resultConsumed || record.status === "running" || record.status === "queued") return;
+    if (completionRuns.get(record) !== completionRuns.get(snapshot)) return;
+    return record;
+  }
+
+  function individualNudge(snapshot: AgentRecord): CompletionMessage | undefined {
+    const record = unreadCompletion(snapshot);
+    if (!record) return;
 
     const notification = formatTaskNotification(record, 500, showCost);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
 
-    pi.sendMessage<NotificationDetails>({
+    return {
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    };
   }
 
   function sendIndividualNudge(record: AgentRecord) {
     agentActivity.delete(record.id);
     fleet.onAgentFinished(record.id);
-    scheduleNudge(record.id, () => emitIndividualNudge(record));
+    const snapshot = snapshotCompletion(record);
+    completionOutbox.schedule(record.id, () => individualNudge(snapshot), NUDGE_HOLD_MS);
   }
 
   // ---- Group join manager ----
@@ -491,9 +534,8 @@ export default function (pi: ExtensionAPI) {
       for (const r of records) { agentActivity.delete(r.id); fleet.onAgentFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
-      scheduleNudge(groupKey, () => {
-        // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
+      completionOutbox.schedule(groupKey, () => {
+        const unconsumed = records.map(unreadCompletion).filter((r): r is AgentRecord => r !== undefined);
         if (unconsumed.length === 0) return;
 
         const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
@@ -507,13 +549,13 @@ export default function (pi: ExtensionAPI) {
           details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
         }
 
-        pi.sendMessage<NotificationDetails>({
+        return {
           customType: "subagent-notification",
           content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
           display: true,
           details,
-        }, { deliverAs: "followUp", triggerTurn: true });
-      });
+        };
+      }, NUDGE_HOLD_MS);
     },
     30_000,
   );
@@ -591,11 +633,11 @@ export default function (pi: ExtensionAPI) {
 
     // If this agent is pending batch finalization (debounce window still open),
     // don't send an individual nudge — finalizeBatch will pick it up retroactively.
-    if (currentBatchAgents.some(a => a.id === record.id)) {
+    if (currentBatchAgents.some(a => a.id === record.id && completionRuns.get(a.snapshot) === completionRuns.get(record))) {
       return;
     }
 
-    const result = groupJoin.onAgentComplete(record);
+    const result = groupJoin.onAgentComplete(snapshotCompletion(record));
     if (result === 'pass') {
       sendIndividualNudge(record);
     }
@@ -669,6 +711,7 @@ export default function (pi: ExtensionAPI) {
    * either be in-process or have gone through `spawnTopLevel` first.
    */
   const spawnResolved = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    currentCtx = ctxRef;
     // Cross-extension callers get the same dispatch contract as the LLM (#183).
     // The RPC layer already throws for an unresolvable model rather than falling
     // back silently; a bad agent type should not be quieter. Throws become error
@@ -759,7 +802,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Cross-extension RPC via pi.events ---
-  let currentCtx: ExtensionContext | undefined;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -1109,6 +1151,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
     currentCtx = undefined;
+    completionOutbox.dispose();
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
@@ -1237,14 +1280,17 @@ export default function (pi: ExtensionAPI) {
   // Uses a debounced timer: each new agent resets the 100ms window so that all
   // parallel tool calls (which may be dispatched across multiple microtasks by the
   // framework) are captured in the same batch.
-  let currentBatchAgents: { id: string; joinMode: JoinMode }[] = [];
+  let currentBatchAgents: { id: string; joinMode: JoinMode; snapshot: AgentRecord }[] = [];
   let batchFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
   let batchCounter = 0;
 
   /** Finalize the current batch: if 2+ smart-mode agents, register as a group. */
   function finalizeBatch() {
     batchFinalizeTimer = undefined;
-    const batchAgents = [...currentBatchAgents];
+    const batchAgents = currentBatchAgents.filter(a => {
+      const record = manager.getRecord(a.id);
+      return record && completionRuns.get(record) === completionRuns.get(a.snapshot);
+    });
     currentBatchAgents = [];
 
     const smartAgents = batchAgents.filter(a => a.joinMode === 'smart' || a.joinMode === 'group');
@@ -1260,7 +1306,7 @@ export default function (pi: ExtensionAPI) {
         if (!record) continue;
         record.groupId = groupId;
         if (record.completedAt != null && !record.resultConsumed) {
-          groupJoin.onAgentComplete(record);
+          groupJoin.onAgentComplete(snapshotCompletion(record));
         }
       }
     } else {
@@ -1327,6 +1373,8 @@ export default function (pi: ExtensionAPI) {
     // resume must behave the same. Passing it would abort this agent when
     // the parent turn is interrupted (user Esc), while agents started with
     // run_in_background in that same turn keep going.
+    // A queued resume can be stopped before it receives a new controller/promise.
+    completionRuns.delete(existing);
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
       maxTurns: opts.maxTurns,
@@ -1347,7 +1395,7 @@ export default function (pi: ExtensionAPI) {
     if (!record) return undefined;
 
     if (joinMode != null && joinMode !== 'async') {
-      currentBatchAgents.push({ id, joinMode });
+      currentBatchAgents.push({ id, joinMode, snapshot: snapshotCompletion(record) });
       if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
       batchFinalizeTimer = setTimeout(finalizeBatch, 100);
     }
@@ -1372,6 +1420,7 @@ export default function (pi: ExtensionAPI) {
 
   // Grab UI context from first tool execution.
   pi.on("tool_execution_start", async (_event, ctx) => {
+    currentCtx = ctx;
     if (ctx.hasUI) fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
   });
 
@@ -1774,6 +1823,7 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      currentCtx = ctx;
       if (ctx.hasUI) fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
 
       // Reload custom agents so new project/global .md files are picked up without restart
@@ -2040,6 +2090,7 @@ Terse command-style prompts produce shallow, generic work.
         let record: AgentRecord | undefined;
         try {
           streamResumeUpdate();
+          completionRuns.delete(existing);
           const resuming = manager.resume(params.resume, params.prompt, signal, {
             maxTurns: resumeMaxTurns,
             onTurnEnd: resumeCallbacks.onTurnEnd,
@@ -2129,11 +2180,11 @@ Terse command-style prompts produce shallow, generic work.
           throw err;
         }
 
-        if (joinMode == null || joinMode === 'async') {
+        if (!record || joinMode == null || joinMode === 'async') {
           // Foreground/no join mode or explicit async — not part of any batch
         } else {
           // smart or group — add to current batch
-          currentBatchAgents.push({ id, joinMode });
+          currentBatchAgents.push({ id, joinMode, snapshot: snapshotCompletion(record) });
           // Debounce: reset timer on each new agent so parallel tool calls
           // dispatched across multiple event loop ticks are captured together
           if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
@@ -2839,7 +2890,7 @@ Terse command-style prompts produce shallow, generic work.
       // Mark result as consumed — suppresses the completion notification
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
-        cancelNudge(params.agent_id);
+        cancelNudge(record.id);
       }
 
       // Verbose: include full conversation

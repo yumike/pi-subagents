@@ -117,17 +117,25 @@ Accumulate usage synchronously and retain the subscription through `subagents:di
 
 When a background agent finishes, pi-subagents sends the user a completion notification. If you have already shown the model that result yourself, that notification arrives on top of an answer that was already given, and it costs the parent a turn to dismiss. `subagents:rpc:consume` is how you say you have handled it — the bus-side half of what `get_subagent_result` does when it returns a result.
 
-**When you send it decides whether it works.** The timeline:
+**Consumption works until notification handoff, not just during the hold.** The timeline:
 
-1. The agent settles and `subagents:completed` is emitted — `src/index.ts:581`.
-2. Eleven lines later, at `src/index.ts:592`, the code checks `record.resultConsumed` and decides whether to notify at all.
-3. `pi.events` dispatch is synchronous and in-process, so a handler that emits `subagents:rpc:consume` **without awaiting anything** has already set that flag before step 2 evaluates.
+1. The agent settles and `subagents:completed` is emitted.
+2. The completion callback checks `record.resultConsumed`. A synchronous RPC consume from your event handler has already set it, so no notification is scheduled.
+3. Otherwise the existing 200 ms hold applies. Ready notifications stay in an extension-owned outbox while `ctx.isIdle()` is false, including preparation, retry and post-run work. `agent_end` is not treated as idle.
+4. At a normal `agent_before_settle`, the outbox rechecks the existing consumption flag and run identity, filters consumed/obsolete group members, and returns unread notifications as `custom_message` drafts with `continue: true`. Appending those entries makes a continuation possible even if the incoming `context.canContinue` was false. Previously contributed boundary drafts are preserved. This is a low-level continuation, not a new `before_agent_start` activity. Ready notifications arriving after that boundary are rechecked again at `agent_settled`; idle unread completions use `sendMessage` with `triggerTurn: true`.
+
+One shared 200 ms idle recheck handles manual compaction returning to idle without an agent-settlement event. It only checks local state, makes no model/tool calls, and stops when no ready, unpaused entries remain.
 
 | When you consume | What happens |
 |---|---|
 | Synchronously, inside your `subagents:completed` handler | The notification is never scheduled. This is the clean path |
-| After an `await`, within 200 ms | Still suppressed. The nudge is held for `NUDGE_HOLD_MS` (`src/index.ts:451`), `consume` cancels the pending timer (`:819`), and there is a re-check at send time (`:474`) |
-| After 200 ms | Too late. The follow-up has fired with `triggerTurn: true` and cost the parent a turn |
+| After an `await`, within 200 ms | Suppressed; individual timers are cancelled and groups recheck consumption before handoff |
+| After 200 ms, while the parent is still active | Still suppressed: the extension retains ownership until a supported delivery boundary |
+| After the notification has been handed to Pi | Too late to retract it. Pi 1.4 has no selective follow-up cancellation API; unrelated user follow-ups are never cleared |
+
+Escape and exhausted provider errors leave already-held unread notifications eligible for the next parent activity, without restarting the parent immediately. This also covers timers whose 200 ms hold has not expired. New completions arriving afterward can still wake an idle parent; this is not a global notification mute. Consumed entries are discarded, and resuming an agent invalidates the old run's pending notification even if the resume queues and is stopped before starting. These entries are in-memory and subject to normal record retention; shutdown/session replacement discards them rather than sending them into the new session. A cancelled switch before shutdown keeps them eligible.
+
+Boundary drafts are committed as session entries (`entry_appended`), not ordinary `message_end` events. Observers needing the notification itself should inspect the committed custom messages or handle that entry event. The custom type, XML content and renderer details are unchanged. Workflow-run notifications are outside this outbox.
 
 Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel sits outside the `subagents:rpc:ping` version handshake on purpose (`src/cross-extension-rpc.ts:190`), so you can send it unconditionally and an older pi-subagents with no handler simply keeps notifying.
 
@@ -177,9 +185,10 @@ This document has no test of its own, so it is worth knowing which claims are ac
 | `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings, model resolution and scope enforcement |
 | `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live FleetView activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
+| `test/deferred-agent-notifications.test.ts` | Real extension/manager with mocked runner and core follow-up queue | Consumption by ID/handle/RPC before and after the hold, unread wakeups, groups/partial groups, resume generations, abort/error retention, preparation/retry gaps, manual-compaction idle recovery, boundary-handler composition, user follow-ups and shutdown |
 | `test/usage-events.test.ts` | Real extension/manager with a mocked runner | Per-message attribution, ownership metadata, resume, settings independence and disposal ordering |
 
-Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings, `subagents:ready`'s `{}` payload, consume's handle resolution, and its missing `workflowId` check.
+Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings, `subagents:ready`'s `{}` payload, and consume's missing `workflowId` check.
 
 ## Reference implementation
 

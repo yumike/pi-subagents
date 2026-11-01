@@ -44,6 +44,7 @@ function makePi() {
 function ctx() {
   return {
     hasUI: false,
+    isIdle: vi.fn(() => true),
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
     cwd: process.cwd(),
     model: undefined,

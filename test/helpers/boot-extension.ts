@@ -84,6 +84,7 @@ export function ctx(overrides: Record<string, unknown> = {}) {
     // mention test exercise the headless fall-through instead.
     mode: "tui",
     hasUI: false,
+    isIdle: vi.fn(() => true),
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
     cwd: process.cwd(),
     model: undefined,

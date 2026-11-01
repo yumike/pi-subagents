@@ -49,6 +49,7 @@ function makePi() {
 function makeHeadlessCtx() {
   return {
     hasUI: false,
+    isIdle: vi.fn(() => true),
     ui: {
       setStatus: vi.fn(),
       setWidget: vi.fn(),

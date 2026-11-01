@@ -481,7 +481,9 @@ Check status and retrieve results from a background agent.
 | `wait` | boolean | no | Wait for completion |
 | `verbose` | boolean | no | Include full conversation log |
 
-Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
+Retrieving a finished result consumes it and suppresses any completion notification still owned by this extension, whether addressed by ID or handle. Running/queued status checks do not consume a result.
+
+Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running. A completion already held when the parent is interrupted waits for the next parent activity rather than immediately restarting it; a completion arriving later can still wake an idle parent.
 
 ### `steer_subagent`
 
@@ -597,6 +599,10 @@ When background agents complete, they notify the main agent. The **join mode** c
 | `group` | Force grouping even when spawning a single agent. Useful when you know more agents will follow. |
 
 **Timeout behavior:** When agents are grouped, a 30-second timeout starts after the first agent completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers.
+
+**Delivery timing:** Individual and group notifications retain their 200 ms hold. While the parent is active, including preparation and retries, ready notifications stay in an extension-owned outbox. At normal `agent_before_settle`, unread results are appended as custom-message entries and request a low-level continuation, without a new `before_agent_start`. An idle unread completion still wakes the parent. One shared 200 ms idle recheck prevents ready notifications getting stranded during manual compaction; it makes no model or tool calls and stops when no ready, unpaused entries remain. Consumption through `get_subagent_result` or RPC is rechecked immediately before handoff, including for partial groups; resuming an agent invalidates its old pending completion.
+
+Escape and exhausted provider errors do not automatically restart the parent for notifications already held: those remain eligible for the next parent activity, subject to normal record retention. A genuinely new completion can still wake an idle parent afterward. Shutdown, including session replacement, discards pending notifications; an attempted switch cancelled before shutdown leaves them eligible. Once a notification has been handed to Pi, later consumption cannot retract it: Pi 1.4 has no selective follow-up cancellation API. Workflow-run notifications are unchanged.
 
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
@@ -959,6 +965,7 @@ src/
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child
   group-join.ts       # Group join manager: batched completion notifications with timeout
+  completion-outbox.ts # Held, consumption-aware agent notifications at Pi settlement boundaries
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
   usage.ts            # Token usage shapes, accumulators, session-stats readers
 
