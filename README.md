@@ -865,9 +865,9 @@ Set `isolation: worktree` to run an agent in a temporary git worktree:
 Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 ```
 
-The agent gets a full, isolated copy of the repository. The worktree directory is removed on completion either way — what differs is whether a branch is left behind:
+The agent gets a full, isolated copy of the repository. The worktree directory is normally removed on completion — what differs is whether a branch is left behind. If inspecting status or staging changes, preserving them in a commit, or creating the branch fails, cleanup stops and reports an explicit error with the retained worktree's recovery path. `hasChanges` is `null` when status inspection fails. Automatic preservation commits include tracked and non-ignored untracked files; ignored files are not included in the branch and are removed on normal successful cleanup. A retained worktree keeps all its files, including ignored files; no OS sandbox or automatic later recovery is provided.
 - **No changes:** worktree is cleaned up automatically, no branch
-- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`), and the result names the branch and the `git merge` command for it. The branch is the only artifact — the worktree path is gone, so nothing points into it
+- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`), and the result names the branch and the `git merge` command for it. The branch is the only artifact after successful cleanup — the worktree path is gone, so nothing points into it
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
 
 The agent's system prompt names the worktree as an isolated copy and tells it to work only there, even if other instructions name the main checkout — otherwise an inherited parent prompt or a task prompt mentioning the project path walks it straight back out of the copy. This is a directive, not a sandbox: an agent with shell access can still `cd` out, so don't rely on `isolation` alone to protect the main checkout.

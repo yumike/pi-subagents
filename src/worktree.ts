@@ -53,12 +53,14 @@ export function isWorktreeIsolationEnabled(): boolean {
 }
 
 export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
-  hasChanges: boolean;
+  /** Whether changes were found; null if inspection failed. */
+  hasChanges: boolean | null;
   /** Branch name if changes were committed. */
   branch?: string;
-  /** Worktree path if it was kept. */
+  /** Worktree path, including the recovery location on failure. */
   path?: string;
+  /** Preservation failed; the worktree was retained for recovery. */
+  error?: string;
 }
 
 /**
@@ -132,11 +134,13 @@ export async function cleanupWorktree(
     return { hasChanges: false };
   }
 
+  let hasChanges: boolean | null = null;
   try {
     // Check for uncommitted changes in the worktree
     const status = await git(pi, worktree.path, ["status", "--porcelain"], 10000);
 
     if (status) {
+      hasChanges = true;
       // Changes exist — stage, commit, and create a branch
       await git(pi, worktree.path, ["add", "-A"], 10000);
       // Truncate description for commit message (no shell sanitization needed — pi.exec uses argv)
@@ -145,8 +149,9 @@ export async function cleanupWorktree(
       await git(pi, worktree.path, ["commit", "--no-verify", "-m", commitMsg], 10000);
     } else {
       const currentSha = await git(pi, worktree.path, ["rev-parse", "HEAD"], 5000);
+      hasChanges = currentSha !== worktree.baseSha;
 
-      if (currentSha === worktree.baseSha) {
+      if (!hasChanges) {
         // No changes — remove worktree
         await removeWorktree(pi, cwd, worktree.path);
         return { hasChanges: false };
@@ -174,10 +179,13 @@ export async function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (error) {
+    // The checkout may be the only remaining copy of unpreserved work.
+    return {
+      hasChanges,
+      path: worktree.path,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

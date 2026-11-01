@@ -346,6 +346,20 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             reportResolved();
           },
         );
+        const cleanup = record.worktreeResult;
+        if (cleanup?.error) {
+          const path = cleanup.path ?? record.worktree?.path;
+          // Structured and stopped results omit prose; recovery must also reach the parent session.
+          // Resumes do not run cleanup, so report here once rather than on every result translation.
+          try {
+            pi.sendMessage({
+              customType: "subagent-worktree-recovery",
+              content: `Workflow child ${record.id}: Worktree cleanup failed: ${cleanup.error}. Worktree retained at \`${path}\`. Inspect and recover the work there before removing it.`,
+              display: true,
+              details: { error: cleanup.error, path },
+            }, { deliverAs: "followUp", triggerTurn: false });
+          } catch { /* notification failure must not change the task outcome */ }
+        }
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child

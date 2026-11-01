@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Task-aware model and reasoning guidance.** Agent and workflow descriptions now encourage choosing a model and reasoning effort for each delegated task rather than routinely matching the parent. Fields remain optional; inheritance and agent-file pin precedence are unchanged.
 
 ### Fixed
+- **Failed worktree preservation now retains the checkout for recovery.** Status, staging, preservation-commit, or branch-creation failures return its path and an explicit error instead of removing it.
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
 
 ## [0.19.0] - 2026-08-25

@@ -394,6 +394,9 @@ A dropped `await`, usually inside a `pipeline` stage. The run would otherwise fi
 **`Cannot run with isolation: "worktree"`.**
 Not a git repo, no commits yet, or `git worktree add` failed. Isolation is a strict guarantee rather than a hint, so it fails loudly instead of quietly running in your main tree. Initialize git and commit at least once, or drop the option.
 
+**`Worktree cleanup failed` after a child finishes or stops.**
+Preservation failed, so the checkout is retained at the recovery path in the diagnostic. Inspect and recover it before removing it. The diagnostic is queued into the parent session without starting an extra model turn; it does not alter the child's outcome or structured JSON. It is not part of the workflow's return value or resume journal. Successful cleanup still removes the temporary checkout; see [Git worktree isolation](../README.md#git-worktree-isolation) for preservation limits.
+
 **`No saved workflow named "x". Looked in: …`**
 The file is not in any of the three directories, or it is there but carries no `export const meta =` declaration, so it is not recognized as a workflow. The message lists the directories it searched and any workflows it did find.
 

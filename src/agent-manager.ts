@@ -26,7 +26,7 @@ import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, type WorktreeCleanupResult, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -763,7 +763,11 @@ export class AgentManager {
       if (record.status !== "running") {
         this.detachParentAbort(record);
         releaseSlot();
-        record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
+        this.recordWorktreeCleanup(record, await cleanupWorktree(pi, baseCwd, wt, options.description));
+        if (record.worktreeResult?.error) {
+          if (!record.isBackground) record.resultConsumed = true;
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        }
         this.drainQueue();
         return;
       }
@@ -889,8 +893,8 @@ export class AgentManager {
             } catch { /* ignore — never block cleanup */ }
           }
           const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
-          record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
+          this.recordWorktreeCleanup(record, wtResult);
+          if (!wtResult.error && wtResult.hasChanges && wtResult.branch) {
             // With a caller-supplied cwd the branch lives in THAT repo, not the
             // parent session's — say so, or the orchestrator merges in the wrong repo.
             const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
@@ -927,7 +931,7 @@ export class AgentManager {
         if (record.worktree) {
           try {
             const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
-            record.worktreeResult = wtResult;
+            this.recordWorktreeCleanup(record, wtResult);
           } catch { /* ignore cleanup errors */ }
         }
 
@@ -945,6 +949,18 @@ export class AgentManager {
     // starts. Read off the options, so a spawn that started from a queue drain
     // still reaches the caller that queued it.
     options.onSpawned?.(id);
+  }
+
+  private recordWorktreeCleanup(record: AgentRecord, result: WorktreeCleanupResult): void {
+    record.worktreeResult = result;
+    if (!result.error) return;
+
+    const path = result.path ?? record.worktree!.path;
+    const branchNote = result.branch ? ` Branch: \`${result.branch}\`.` : "";
+    const note = `Worktree cleanup failed: ${result.error}. Worktree retained at \`${path}\`.${branchNote} Inspect and recover the work there before removing it.`;
+    // Cleanup failure does not change the task outcome; error readers need the recovery note too.
+    record.result = (record.result ?? "") + `\n\n---\n${note}`;
+    if (record.error) record.error += `\n\n${note}`;
   }
 
   /**
