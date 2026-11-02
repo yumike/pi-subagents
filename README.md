@@ -630,7 +630,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Operational settings are read at extension initialization from `<getAgentDir()>/subagents.json` (default `~/.pi/agent/subagents.json`, honoring `PI_CODING_AGENT_DIR`). Edit this global file manually, then reload the extension or restart pi to apply changes; the extension does not write settings or expose a settings write API. Existing `<cwd>/.pi/subagents.json` files are ignored, not deleted or migrated. Manually copy any wanted preferences into the global file. Project agent files, workflows, custom descriptions and Pi's own settings remain separate.
+Operational settings are read at extension initialization from `<getAgentDir()>/subagents.json` (default `~/.pi/agent/subagents.json`, honoring `PI_CODING_AGENT_DIR`). Edit this global file manually, then reload the extension or restart pi to apply changes; the extension does not write settings or expose a settings write API. Existing `<cwd>/.pi/subagents.json` files are ignored, not deleted or migrated. Manually copy any wanted preferences into the global file. Project agent files, workflows and Pi's own settings remain separate.
 
 Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
 
@@ -689,20 +689,7 @@ Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless
 
 The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start` and nowhere earlier, because `getAllTools` throws during extension loading and load order means a check at registration time could not see an extension that has not loaded yet — so the tool is registered first and withdrawn from the active set through `setActiveTools`, which rebuilds the system prompt before any turn runs. When the other extension took the `SubagentWorkflow` name itself, pi's first-registration-wins rule already dropped ours, so there is nothing to withdraw and only the menu and the CLI flag come down.
 
-**Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` is the rich Claude Code-style prompt (~1,400 tokens with the default agents); `"compact"` is ~75% smaller — one-line agent type list, terse usage notes — for small/local models where tool-spec tokens are expensive. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
-
-`"custom"` registers your own description from `<cwd>/.pi/agent-tool-description.md` (project) or `<agentDir>/agent-tool-description.md` (global; project wins). The file is read once at tool registration, so edits also apply on the next pi session. Dynamic parts stay live via placeholders — a static agent list would go stale the moment you add a custom agent:
-
-```markdown
-Launch an autonomous agent. Available types:
-{{typeList}}
-
-Custom agents live in .pi/agents/ or {{agentDir}}/agents/.
-```
-
-Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`, `{{isolationGuideline}}` and `{{scheduleGuideline}}` (each expands with its own leading newline + `- ` bullet when the matching feature is on — place them directly after your last rule line; empty when [worktree isolation](#turning-worktrees-off) / scheduling is off). Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
-
-**Starting point:** copy [`examples/agent-tool-description.md`](examples/agent-tool-description.md) — it reproduces the default full description exactly (a CI test keeps it in sync), so you can trim from a known-good baseline instead of writing from scratch.
+**Agent tool description:** The `Agent` tool uses a compact description with a dynamic list of available agent types and their tool scopes. The separate `SubagentWorkflow` description retains its full dynamic type list and workflow guidance.
 
 **Example — global defaults for a beefy machine:**
 
@@ -886,7 +873,7 @@ Three levers, from narrowest to broadest:
 - **Per agent** — `isolation: off` in an agent file. Frontmatter is authoritative, so this refuses a worktree even when the caller passes `isolation: "worktree"` — the only way to override a caller. Workflow `agent()` calls are the exception: only the script's option decides there.
 - **Global** — `"worktreeIsolation": false` in global `subagents.json`. The `Agent` tool's `isolation` parameter disappears from the schema entirely, along with the usage-note bullet that describes it (so it costs the model no context and cannot be passed), and worktree creation is refused on every other path too: agent files, scheduled jobs, and cross-extension RPC. The `/agents` generator also stops offering `isolation:` when writing a new agent file. The schema and the description are both built at tool registration, so they appear or disappear in the next pi session.
 
-  Schema and prose are gated together on purpose. Leaving the bullet in would teach the model to pass a field that is no longer declared — accepted silently, then dropped — and since a refused worktree carries no note on the result, the model would have every reason to go on reporting a `pi-agent-*` branch that was never created. A custom tool description should use the `{{isolationGuideline}}` placeholder rather than hardcoding the bullet, for the same reason.
+  Schema and prose are gated together on purpose. Leaving the bullet in would teach the model to pass a field that is no longer declared — accepted silently, then dropped — and since a refused worktree carries no note on the result, the model would have every reason to go on reporting a `pi-agent-*` branch that was never created.
 
 ## Skill Preloading
 
@@ -939,7 +926,6 @@ docs/                 # Long-form guides (shipped to npm; README links out to th
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
   workflows/          # Runnable examples, executed by test/workflow-examples.test.ts
-  agent-tool-description.md
 test/                 # vitest suite; e2e/ and perf/ subdirectories
 src/
   index.ts            # Extension entry: tool/command registration, /agents menu, rendering
