@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 /**
- * Project/global default for writing a subagent's `.output` transcript; a custom
+ * Global default for writing a subagent's `.output` transcript; a custom
  * agent's `output_transcript` overrides it per agent.
  *
  * State lives here rather than in an index.ts closure because both spawn paths

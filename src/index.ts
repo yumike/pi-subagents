@@ -13,14 +13,14 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { getAgentConversation, getDefaultMaxTurns, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type CompletionMessage, CompletionOutbox } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -30,12 +30,12 @@ import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from ".
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
-import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
+import { checkModelScope, setScopeModelsEnabled } from "./model-scope.js";
+import { setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, loadSettings, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode } from "./types.js";
 import {
@@ -390,7 +390,7 @@ export default function (pi: ExtensionAPI) {
 
   // Read directly rather than waiting for applyAndEmitLoaded below: this decides
   // the initial load, which happens hundreds of lines before settings are applied.
-  let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
+  let strictAgentFiles = loadSettings().strictAgentFiles === true;
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
@@ -408,7 +408,6 @@ export default function (pi: ExtensionAPI) {
   // ---- Usage reporting (both off by default; see SubagentsSettings) ----
   /** Attach subagent spend to tool results, so the parent session counts it. */
   let reportUsage = false;
-  function isReportUsageEnabled(): boolean { return reportUsage; }
   function setReportUsage(b: boolean): void {
     reportUsage = b;
     // Whatever accumulated while it was on is stale the moment it goes off:
@@ -428,16 +427,6 @@ export default function (pi: ExtensionAPI) {
   let viewerMarkdown: ViewerMarkdownMode = "assistant";
   function getViewerMarkdown(): ViewerMarkdownMode { return viewerMarkdown; }
   function setViewerMarkdown(mode: ViewerMarkdownMode): void { viewerMarkdown = mode; }
-  /**
-   * The viewer's `m` key, from either entry point: set the mode and persist it,
-   * so the key and `/agents → Settings` stay one setting rather than one per
-   * entry point. `ctx` carries only the warning a failed write notifies with,
-   * and the fleet list may be acting without one.
-   */
-  function chooseViewerMarkdown(mode: ViewerMarkdownMode, ctx?: ExtensionCommandContext): void {
-    setViewerMarkdown(mode);
-    persistSettings(ctx, `Viewer markdown set to ${mode}`);
-  }
   const pendingUsage = new PendingUsagePool();
 
   let currentCtx: ExtensionContext | undefined;
@@ -1187,14 +1176,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  // The trailing arguments keep a conversation overlay opened here identical to
-  // one opened from `/agents`: same settings on the way in, same persist out.
+  // Both entry points share the live session mode without writing configuration.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
-    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar);
-  let fleetViewEnabled = true;
-  function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
-  function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
+    setViewerMarkdown, getFullscreenScrollbar);
 
   // Claude Code-style `@handle message` prompt mentions. Read live by both the
   // `input` hook and the stacked autocomplete provider, so the toggle applies
@@ -1208,14 +1192,13 @@ export default function (pi: ExtensionAPI) {
   // the steer and resume branches — reads this instead of the mode.
   function isAgentMentionsEnabled(): boolean { return agentMentionMode !== "off"; }
 
-  // Project/global default for writing the subagent .output transcript lives in
+  // Global default for writing the subagent .output transcript lives in
   // output-file.ts (both spawn paths read it). A custom agent's
   // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
   // is silent, this default applies. Read live at spawn time.
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
-  function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
 
   // What an unqualified top-level spawn means. Defaults to background,
@@ -1227,10 +1210,7 @@ export default function (pi: ExtensionAPI) {
 
   // Master switch for the schedule subagent feature. Defaults to enabled.
   // Read once at extension init (before tool registration) so the Agent tool's
-  // param schema reflects the persisted setting. Runtime toggles via /agents
-  // → Settings short-circuit the menu entry + the execute-time addJob path
-  // immediately, but the schema-level removal only takes effect on next
-  // extension load (next pi session). Documented in CHANGELOG/README.
+  // param schema reflects the global setting.
   let schedulingEnabled = true;
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
@@ -1242,7 +1222,7 @@ export default function (pi: ExtensionAPI) {
   // there is no second door into the same machinery.
   //
   // `workflowsPinned` records that the answer came from the user — a boolean in
-  // subagents.json, or the settings toggle — rather than from this default. It
+  // subagents.json — rather than from this default. It
   // is what `resolveWorkflowCollisions` checks before yielding to another
   // extension's workflow tool: a default may be overridden by what else is
   // loaded, an explicit choice may not.
@@ -1259,7 +1239,7 @@ export default function (pi: ExtensionAPI) {
   // When enabled, the three hardcoded default agents (general-purpose, Explore,
   // Plan) are not registered. User-defined agents from project/global custom
   // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
-  // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
+  // Defaults to false; opt-in via global subagents.json.
   // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
   // needs it; this wrapper just re-registers after flipping it.
   function setDisableDefaultAgents(b: boolean): void {
@@ -1458,7 +1438,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
-  // Global + project merged; missing → defaults; corrupt file emits a warning
+  // Global only; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
   applyAndEmitLoaded(
     {
@@ -1473,7 +1453,7 @@ export default function (pi: ExtensionAPI) {
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
-      setFleetView: setFleetViewEnabled,
+      setFleetView: (b) => fleet.setEnabled(b),
       setAgentMentions: setAgentMentionMode,
       setRememberAgents,
       setOutputTranscript: setOutputTranscriptDefault,
@@ -1513,7 +1493,7 @@ export default function (pi: ExtensionAPI) {
     : "";
 
   // Same trade as scheduleParam/scheduleGuideline above: `isolationParam` drops
-  // the field from the schema when the project set `worktreeIsolation: false`,
+  // the field from the schema when the user set `worktreeIsolation: false`,
   // so the prose has to go with it. Left in, it would teach the model to pass a
   // parameter that isn't declared — accepted (TypeBox sets no
   // `additionalProperties: false`) and then silently dropped by the resolver.
@@ -1898,7 +1878,7 @@ Terse command-style prompts produce shallow, generic work.
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
-      // frontmatter (`output_transcript`) wins; otherwise the project/global
+      // frontmatter (`output_transcript`) wins; otherwise the global
       // default applies. `attachTranscript` below is the SOLE gate — every
       // downstream consumer keys off record.outputFile being set, so no spawn
       // path can re-enable the transcript by accident.
@@ -1985,7 +1965,7 @@ Terse command-style prompts produce shallow, generic work.
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
-          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+          return textResult(`Scheduling is disabled. Set "schedulingEnabled": true in ${join(getAgentDir(), "subagents.json")} and restart pi.`);
         }
         if (params.resume) {
           return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
@@ -2764,8 +2744,8 @@ Terse command-style prompts produce shallow, generic work.
     // than saying why nothing ran.
     if (!isWorkflowsEnabled()) {
       report(
-        `--${WORKFLOW_FILE_FLAG} ignored: workflows are off. Turn them on in /agents → Settings → Workflows, ` +
-          'or set `"workflowsEnabled": true` in .pi/subagents.json.',
+        `--${WORKFLOW_FILE_FLAG} ignored: workflows are off. Set "workflowsEnabled": true in ` +
+          `${join(getAgentDir(), "subagents.json")} and restart pi.`,
         "warning",
       );
       return;
@@ -3020,7 +3000,6 @@ Terse command-style prompts produce shallow, generic work.
 
     // Actions
     options.push("Create new agent");
-    options.push("Settings");
 
     const noAgentsMsg = allNames.length === 0 && agents.length === 0
       ? "No agents found. Create specialized subagents that can be delegated to.\n\n" +
@@ -3049,9 +3028,6 @@ Terse command-style prompts produce shallow, generic work.
       await showAgentsMenu(ctx);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);
-    } else if (choice === "Settings") {
-      await showSettings(ctx);
-      await showAgentsMenu(ctx);
     }
   }
 
@@ -3074,7 +3050,7 @@ Terse command-style prompts produce shallow, generic work.
 
     // One row per agent (name in the left column, model on the right); the
     // full description renders below the highlighted row via SettingsList,
-    // exactly like the Settings menu — so long descriptions never wrap the list.
+    // so long descriptions never wrap the list.
     const items: SettingItem[] = allNames.map(name => {
       const cfg = getAgentConfig(name);
       const disabled = cfg?.enabled === false;
@@ -3162,7 +3138,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar());
+        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, setViewerMarkdown, getFullscreenScrollbar());
       },
       {
         overlay: true,
@@ -3514,521 +3490,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Created ${targetPath}`, "info");
-  }
-
-  /**
-   * Every settings mutation writes this WHOLE object back to disk, so a field
-   * missing here is erased from the user's subagents.json the next time they
-   * toggle something unrelated. `SubagentsSettings` has every field optional,
-   * so a `: SubagentsSettings` return annotation would let a newly-added setting
-   * be forgotten here and still type-check. `satisfies` instead: it still checks
-   * each value's type and rejects a mistyped key, but leaves the return type
-   * inferred so `_NoMissingSettingsKeys` below can check completeness.
-   */
-  function snapshotSettings() {
-    return {
-      maxConcurrent: manager.getMaxConcurrent(),
-      // 0 = unlimited, and the default — see SubagentsSettings.
-      maxConcurrentForeground: manager.getMaxConcurrentForeground(),
-      // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
-      // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
-      defaultMaxTurns: getDefaultMaxTurns() ?? 0,
-      graceTurns: getGraceTurns(),
-      defaultJoinMode: getDefaultJoinMode(),
-      backgroundByDefault: getBackgroundByDefault(),
-      schedulingEnabled: isSchedulingEnabled(),
-      scopeModels: isScopeModelsEnabled(),
-      strictAgentFiles,
-      disableDefaultAgents: isDefaultsDisabled(),
-      toolDescriptionMode: getToolDescriptionMode(),
-      fleetView: isFleetViewEnabled(),
-      agentMentions: getAgentMentionMode(),
-      rememberAgents: getRememberAgents(),
-      outputTranscript: getOutputTranscriptDefault(),
-      worktreeIsolation: isWorktreeIsolationEnabled(),
-      // The user's answer, not the effective one. A stand-down for another
-      // extension's workflow tool is scoped to the session it was detected in;
-      // writing it here would let an unrelated settings change three menus away
-      // freeze it into the file as an explicit `false`, which then survives
-      // uninstalling the extension it was deferring to. undefined is dropped by
-      // JSON.stringify, so unset stays unset — same reasoning as
-      // `fallbackSubagent` below.
-      workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : undefined,
-      maxSubagentDepth: getMaxSubagentDepth(),
-      // Deliberately NOT `?? "general-purpose"`: every settings change writes the
-      // whole snapshot, and materializing the implicit default would turn it into
-      // explicit configuration — which then fails loudly if general-purpose later
-      // goes away. undefined is dropped by JSON.stringify.
-      fallbackSubagent: getFallbackSubagent(),
-      reportUsage: isReportUsageEnabled(),
-      showCost: isShowCostEnabled(),
-      viewerMarkdown: getViewerMarkdown(),
-    } satisfies SubagentsSettings;
-  }
-
-  // Compile-time completeness guard for snapshotSettings(). If a field is added
-  // to SubagentsSettings and not mirrored above, this Exclude is non-empty and
-  // fails to satisfy `never` — turning a silent settings-erasure bug into a
-  // typecheck error. `npm run typecheck` runs in CI.
-  type _NoMissingSettingsKeys =
-    Exclude<keyof SubagentsSettings, keyof ReturnType<typeof snapshotSettings>> extends never
-      ? true
-      : ["snapshotSettings() is missing a SubagentsSettings key"];
-  const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
-  void _settingsSnapshotIsComplete;
-
-  const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
-  ]);
-
-  async function showSettings(ctx: ExtensionCommandContext) {
-    function buildItems(): SettingItem[] {
-      const mc = manager.getMaxConcurrent();
-      const mcf = manager.getMaxConcurrentForeground();
-      const dmt = getDefaultMaxTurns() ?? 0;
-      const gt = getGraceTurns();
-      const msd = getMaxSubagentDepth();
-      // Label what unset actually does — it targets general-purpose even when
-      // that is unregistered (the permissive hardcoded tier), so showing "none"
-      // there would advertise strict dispatch for the most permissive state.
-      // `values` still offers only resolvable targets, so the user cannot
-      // persist a fallback that would hard-error on every dispatch.
-      const fallbackValue = getFallbackSubagent() ?? "general-purpose";
-      const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
-
-      return [
-        {
-          id: "maxConcurrent",
-          label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
-          currentValue: String(mc),
-          values: [String(mc)],
-        },
-        {
-          id: "maxConcurrentForeground",
-          label: "Max foreground concurrency",
-          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
-          currentValue: String(mcf),
-          values: [String(mcf)],
-        },
-        {
-          id: "defaultMaxTurns",
-          label: "Default max turns",
-          description: "Default max turns before wrap-up (0 = unlimited, Enter to type)",
-          currentValue: String(dmt),
-          values: [String(dmt)],
-        },
-        {
-          id: "graceTurns",
-          label: "Grace turns",
-          description: "Grace turns after wrap-up steer (Enter to type)",
-          currentValue: String(gt),
-          values: [String(gt)],
-        },
-        {
-          id: "maxSubagentDepth",
-          label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-          currentValue: String(msd),
-          values: [String(msd)],
-        },
-        {
-          id: "joinMode",
-          label: "Join mode",
-          description: "Default join mode for background agents",
-          currentValue: getDefaultJoinMode(),
-          values: ["smart", "async", "group"],
-        },
-        {
-          id: "backgroundByDefault",
-          label: "Background by default",
-          description: "An Agent call that doesn't say runs detached (off = blocks the turn and returns inline)",
-          currentValue: getBackgroundByDefault() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "schedulingEnabled",
-          label: "Scheduling",
-          description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
-          currentValue: isSchedulingEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "workflowsEnabled",
-          label: "Workflows",
-          description:
-            "Scripted workflows, on unless another extension provides a workflow tool "
-            + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
-          currentValue: isWorkflowsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "scopeModels",
-          label: "Scope models",
-          description: "Validate subagent models against scoped models (/scoped-models)",
-          currentValue: isScopeModelsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "strictAgentFiles",
-          label: "Strict agent files",
-          description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
-          currentValue: strictAgentFiles ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "disableDefaultAgents",
-          label: "Disable defaults",
-          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
-          currentValue: isDefaultsDisabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "fallbackSubagent",
-          label: "Fallback agent",
-          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
-          currentValue: fallbackValue,
-          values: fallbackValues,
-        },
-        {
-          id: "outputTranscript",
-          label: "Output transcript",
-          description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
-          currentValue: getOutputTranscriptDefault() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "worktreeIsolation",
-          label: "Worktree isolation",
-          description:
-            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
-          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "reportUsage",
-          label: "Report usage to session",
-          description:
-            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
-          currentValue: isReportUsageEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "showCost",
-          label: "Show cost",
-          description:
-            "Show an estimated `~$0.0042` beside subagent token counts in the fleet view, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
-          currentValue: isShowCostEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "viewerMarkdown",
-          label: "Viewer markdown",
-          description:
-            "How much of the conversation viewer renders as Markdown. assistant = assistant text only (default); all = tool results too, for tools that emit Markdown — accepting that a Markdown pass over a diff or a log eats `#` comments, swallows a `---` line and re-fences indented output; off = everything verbatim. `m` in the viewer cycles the same setting (footer: raw / md / md+).",
-          currentValue: getViewerMarkdown(),
-          values: ["off", "assistant", "all"],
-        },
-        {
-          id: "fleetView",
-          label: "Fleet view",
-          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
-          currentValue: isFleetViewEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "agentMentions",
-          label: "Agent mentions",
-          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
-          currentValue: getAgentMentionMode(),
-          values: ["model", "direct", "off"],
-        },
-        {
-          id: "rememberAgents",
-          label: "Remember agents",
-          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
-          currentValue: getRememberAgents() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "toolDescriptionMode",
-          label: "Tool description",
-          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
-          currentValue: getToolDescriptionMode(),
-          values: ["full", "compact", "custom"],
-        },
-      ];
-    }
-
-    function applyValue(id: string, value: string) {
-      if (id === "maxConcurrent") {
-        const n = parseInt(value, 10);
-        if (n >= 1) {
-          manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
-        }
-      } else if (id === "maxConcurrentForeground") {
-        // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
-        const n = parseInt(value, 10);
-        if (n >= 0) {
-          manager.setMaxConcurrentForeground(n);
-          notifyApplied(ctx, n === 0
-            ? "Max foreground concurrency set to unlimited"
-            : `Max foreground concurrency set to ${n}`);
-        }
-      } else if (id === "defaultMaxTurns") {
-        const n = parseInt(value, 10);
-        if (n === 0) {
-          setDefaultMaxTurns(undefined);
-          notifyApplied(ctx, "Default max turns set to unlimited");
-        } else if (n >= 1) {
-          setDefaultMaxTurns(n);
-          notifyApplied(ctx, `Default max turns set to ${n}`);
-        }
-      } else if (id === "graceTurns") {
-        const n = parseInt(value, 10);
-        if (n >= 1) {
-          setGraceTurns(n);
-          notifyApplied(ctx, `Grace turns set to ${n}`);
-        }
-      } else if (id === "maxSubagentDepth") {
-        const n = parseInt(value, 10);
-        if (n >= 0) {
-          setMaxSubagentDepth(n);
-          notifyApplied(
-            ctx,
-            n <= 1
-              ? "Nested delegation disabled"
-              : `Nested depth set to ${n}. Applies to agents started from now on.`,
-          );
-        }
-      } else if (id === "joinMode") {
-        setDefaultJoinMode(value as JoinMode);
-        notifyApplied(ctx, `Default join mode set to ${value}`);
-      } else if (id === "backgroundByDefault") {
-        const enabled = value === "on";
-        setBackgroundByDefault(enabled);
-        notifyApplied(
-          ctx,
-          enabled
-            ? "Agent calls run in the background unless they pass run_in_background: false"
-            : "Agent calls block and return inline unless they pass run_in_background: true",
-        );
-      } else if (id === "schedulingEnabled") {
-        const enabled = value === "on";
-        if (enabled === isSchedulingEnabled()) {
-          ctx.ui.notify(`Scheduling already ${enabled ? "enabled" : "disabled"}.`, "info");
-        } else {
-          setSchedulingEnabled(enabled);
-          if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
-          notifyApplied(
-            ctx,
-            `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
-          );
-        }
-      } else if (id === "workflowsEnabled") {
-        const enabled = value === "on";
-        if (enabled === isWorkflowsEnabled()) {
-          ctx.ui.notify(`Workflows already ${enabled ? "enabled" : "disabled"}.`, "info");
-        } else {
-          setWorkflowsEnabled(enabled);
-          // Runs already in flight keep going: the switch governs whether the
-          // tool is offered, and killing live agents on a settings toggle would
-          // lose work the user never asked to discard.
-          notifyApplied(
-            ctx,
-            `Workflows ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
-          );
-        }
-      } else if (id === "scopeModels") {
-        const enabled = value === "on";
-        setScopeModelsEnabled(enabled);
-        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "strictAgentFiles") {
-        const enabled = value === "on";
-        strictAgentFiles = enabled;
-        notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
-      } else if (id === "disableDefaultAgents") {
-        const enabled = value === "on";
-        setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
-      } else if (id === "fallbackSubagent") {
-        setFallbackSubagent(value);
-        notifyApplied(
-          ctx,
-          value === NO_FALLBACK
-            ? "Unknown or disabled agent types will now be rejected"
-            : `Unknown agent types will fall back to ${value}`,
-        );
-      } else if (id === "outputTranscript") {
-        const enabled = value === "on";
-        setOutputTranscriptDefault(enabled);
-        notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
-      } else if (id === "worktreeIsolation") {
-        const enabled = value === "on";
-        setWorktreeIsolationEnabled(enabled);
-        // The refusal is live, but the tool schema is built at registration, so
-        // the isolation parameter only appears/disappears next session.
-        notifyApplied(
-          ctx,
-          `Worktree isolation ${enabled ? "enabled" : "disabled"}. Tool parameter updates on next pi session.`,
-        );
-      } else if (id === "toolDescriptionMode") {
-        setToolDescriptionMode(value as ToolDescriptionMode);
-        notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
-      } else if (id === "reportUsage") {
-        const enabled = value === "on";
-        setReportUsage(enabled);
-        notifyApplied(
-          ctx,
-          enabled
-            ? "Subagent usage now counted in this session's totals"
-            : "Subagent usage no longer counted in this session's totals",
-        );
-      } else if (id === "showCost") {
-        const enabled = value === "on";
-        setShowCost(enabled);
-        notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "viewerMarkdown") {
-        setViewerMarkdown(value as ViewerMarkdownMode);
-        notifyApplied(ctx, `Viewer markdown set to ${value}`);
-      } else if (id === "fleetView") {
-        const enabled = value === "on";
-        setFleetViewEnabled(enabled);
-        notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "agentMentions") {
-        const mode = value as AgentMentionMode;
-        setAgentMentionMode(mode);
-        notifyApplied(
-          ctx,
-          mode === "off"
-            ? "Agent mentions disabled"
-            : mode === "model"
-              ? "Agent mentions on — a conversation clone starts a mentioned agent off-screen"
-              : "Agent mentions on — a mentioned agent starts here, with no model call",
-        );
-      } else if (id === "rememberAgents") {
-        const enabled = value === "on";
-        setRememberAgents(enabled);
-        notifyApplied(ctx, `Remember agents ${enabled ? "enabled" : "disabled"}`);
-      }
-    }
-
-    let list: SettingsList;
-    // Track current selection index directly (SettingsList doesn't expose it).
-    // Updated on arrow keys so Enter knows which field is selected immediately.
-    let currentIndex = 0;
-
-    const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
-      const items = buildItems();
-
-      list = new SettingsList(
-        items,
-        items.length + 2,
-        getSettingsListTheme(),
-        (id, newValue) => {
-          applyValue(id, newValue);
-        },
-        () => done(undefined as undefined),
-      );
-
-      const container = new Container();
-      container.addChild(new Text("⚙  Subagent Settings", 0, 0));
-      container.addChild(new Spacer(1));
-      container.addChild(list);
-
-      return {
-        render: (w: number) => container.render(w),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => {
-          // Track navigation so Enter knows the current field
-          if (matchesKey(data, "up")) {
-            currentIndex = Math.max(0, currentIndex - 1);
-          } else if (matchesKey(data, "down")) {
-            currentIndex = Math.min(items.length - 1, currentIndex + 1);
-          }
-
-          // Enter on numeric field → close and prompt for typed input
-          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
-            done(items[currentIndex].id);
-            return;
-          }
-          list.handleInput?.(data);
-        },
-      };
-    });
-
-    // If a numeric field ID was returned, prompt for typed input
-    if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent"
-        ? String(manager.getMaxConcurrent())
-        : result === "maxConcurrentForeground"
-          ? String(manager.getMaxConcurrentForeground())
-          : result === "defaultMaxTurns"
-            ? String(getDefaultMaxTurns() ?? 0)
-            : result === "maxSubagentDepth"
-              ? String(getMaxSubagentDepth())
-              : String(getGraceTurns());
-
-      const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
-        : result === "maxConcurrentForeground"
-          ? "Max foreground concurrency (0 = unlimited)"
-          : result === "defaultMaxTurns"
-            ? "Default max turns (0 = unlimited)"
-            : result === "maxSubagentDepth"
-              ? "Nested depth (0/1 = nesting off)"
-              : "Grace turns (1+)";
-
-      // Loop until user enters a valid integer or cancels (Esc / null).
-      // Silently trims whitespace; rejects non-numeric input by re-prompting.
-      let input: string | undefined = await ctx.ui.input(label, current);
-      while (input != null) {
-        const trimmed = input.trim();
-        const n = Number(trimmed);
-        if (trimmed !== "" && Number.isInteger(n)) {
-          applyValue(result, String(n));
-          await showSettings(ctx);
-          return;
-        }
-        // Invalid — re-prompt with the user's last entry so they can edit it
-        input = await ctx.ui.input(label, trimmed);
-      }
-    }
-  }
-
-  // Persist the current snapshot, emit `subagents:settings_changed`, and surface
-  // the right toast. Successful saves show info; persistence failures downgrade
-  // to warning so users aren't silently reverted on restart. Event fires regardless
-  // of outcome so listeners see the in-memory change.
-  /**
-   * Persist + broadcast the settings, silent on success — for a change whose
-   * feedback is the UI it just changed: the viewer's `m` key, where a
-   * notification per press would talk over the overlay it is describing.
-   *
-   * A *failed* write still speaks. Every other settings path warns when the
-   * value is session-only, and swallowing it here would leave a preference
-   * looking persisted when the next session will not have it.
-   */
-  function persistSettings(ctx: ExtensionCommandContext | undefined, changeMsg: string): void {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      changeMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
-    // `ctx` is absent only on the fleet path between sessions, where
-    // `currentCtx` has been cleared and there is no UI to carry the warning to.
-    // The write still happens.
-    if (level === "warning") ctx?.ui.notify(message, level);
-  }
-
-  function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      successMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
-    ctx.ui.notify(message, level);
   }
 
   pi.registerCommand("agents", {

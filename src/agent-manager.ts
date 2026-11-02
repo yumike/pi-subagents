@@ -305,7 +305,7 @@ interface SpawnOptions {
 }
 
 interface ResumeOptions {
-  /** Per-resume budget; omitted uses the stored invocation, then type/project defaults. Zero is unlimited. */
+  /** Per-resume budget; omitted uses the stored invocation, then type/global defaults. Zero is unlimited. */
   maxTurns?: number;
   /** Count since this resume prompt, not the session's lifetime. */
   onTurnEnd?: (turnCount: number) => void;
@@ -705,13 +705,9 @@ export class AgentManager {
     // still copying its repo. Claiming "running" here also keeps abort() and
     // abortAll() able to reach an agent whose worktree is still being created.
     //
-    // The pool is resolved ONCE, here, and carried to `settleRun` below:
-    // `poolFor` reads `maxConcurrentForeground`, which the user can change from
-    // `/agents → Settings` mid-run, so recomputing it at settle time would
-    // decrement a pool this run never charged (counter underflow, limit
-    // silently lifted) or skip the decrement for one it did (leaked slot —
-    // every later blocking spawn queues forever). The two startup exits below
-    // never reach `settleRun`, so they hand the slot back themselves.
+    // Carry the charged pool through settlement: the manager's limit setters
+    // can change it mid-run, so recomputing could underflow or leak a slot.
+    // Startup exits never reach `settleRun` and hand the slot back themselves.
     const pool = this.poolFor(record);
     const releaseSlot = () => {
       if (pool === "background") this.runningBackground--;
@@ -726,7 +722,7 @@ export class AgentManager {
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done BEFORE
     // the run is kicked off so a failure doesn't leave a half-running agent.
-    // The project switch is enforced here as well as at the tool boundary
+    // The global switch is enforced here as well as at the tool boundary
     // because cross-extension RPC forwards its options unvalidated — a schema
     // that omits the field can't stop a caller that never saw the schema.
     // Owned children already resolved isolation; undefined means off, not a global fallback.

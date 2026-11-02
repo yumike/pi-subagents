@@ -122,7 +122,7 @@ describe("issue #174: foreground agent that hits max_turns", () => {
     process.env.HOME = agentDir;
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     process.chdir(tmpDir);
   });
 

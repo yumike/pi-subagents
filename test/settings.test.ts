@@ -2,26 +2,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  applyAndEmitLoaded,
-  applySettings,
-  loadSettings,
-  persistToastFor,
-  type SettingsAppliers,
-  saveAndEmitChanged,
-  saveSettings,
-} from "../src/settings.js";
+import { applyAndEmitLoaded, applySettings, loadSettings, type SettingsAppliers } from "../src/settings.js";
 
-/**
- * Tests for persistent settings. Uses two tmp directories:
- * - `globalDir`: redirected via PI_CODING_AGENT_DIR so getAgentDir() returns it.
- *   Simulates `~/.pi/agent/` — the global scope.
- * - `projectDir`: passed explicitly as cwd to load/save.
- *   Simulates the user's project root. Settings live at `<projectDir>/.pi/subagents.json`.
- */
-describe("settings persistence", () => {
+describe("read-only global settings", () => {
   let globalDir: string;
   let projectDir: string;
+  let originalCwd: string;
   let originalAgentDirEnv: string | undefined;
 
   const globalFile = () => join(globalDir, "subagents.json");
@@ -30,15 +16,19 @@ describe("settings persistence", () => {
   beforeEach(() => {
     globalDir = mkdtempSync(join(tmpdir(), "pi-settings-global-"));
     projectDir = mkdtempSync(join(tmpdir(), "pi-settings-project-"));
+    originalCwd = process.cwd();
     originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = globalDir;
+    process.chdir(projectDir);
   });
 
   afterEach(() => {
+    process.chdir(originalCwd);
     if (originalAgentDirEnv == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
     rmSync(globalDir, { recursive: true, force: true });
     rmSync(projectDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
   function writeGlobal(obj: unknown) {
@@ -50,279 +40,143 @@ describe("settings persistence", () => {
     writeFileSync(projectFile(), JSON.stringify(obj));
   }
 
-  it("returns {} when both files are missing", () => {
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("returns {} when both files are malformed JSON", () => {
-    writeFileSync(globalFile(), "not json {{");
-    mkdirSync(join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(projectFile(), "also not json");
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("loads from global when no project file", () => {
-    writeGlobal({ maxConcurrent: 16, graceTurns: 10 });
-    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 16, graceTurns: 10 });
-  });
-
-  it("loads from project when no global file", () => {
-    writeProject({ maxConcurrent: 8, defaultJoinMode: "group" });
-    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 8, defaultJoinMode: "group" });
-  });
-
-  it("merges global + project with project winning on conflicts", () => {
-    writeGlobal({ maxConcurrent: 16, graceTurns: 10, defaultJoinMode: "async" });
-    writeProject({ maxConcurrent: 4, defaultMaxTurns: 50 });
-    expect(loadSettings(projectDir)).toEqual({
-      maxConcurrent: 4, // project wins
-      graceTurns: 10, // from global
-      defaultJoinMode: "async", // from global
-      defaultMaxTurns: 50, // from project only
+  it("preserves defaults when global settings are absent, ignoring project settings", () => {
+    writeProject({ maxConcurrent: 1, workflowsEnabled: false });
+    expect(loadSettings()).toEqual({});
+    expect(existsSync(globalFile())).toBe(false);
+    expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({
+      maxConcurrent: 1, workflowsEnabled: false,
     });
   });
 
-  it("round-trips values: saveSettings then loadSettings", () => {
-    const settings = {
-      maxConcurrent: 7,
-      defaultMaxTurns: 30,
-      graceTurns: 3,
-      defaultJoinMode: "smart" as const,
-      schedulingEnabled: false,
-      toolDescriptionMode: "compact" as const,
-    };
-    saveSettings(settings, projectDir);
-    expect(loadSettings(projectDir)).toEqual(settings);
+  it("loads only global settings without merging or modifying the project file", () => {
+    writeGlobal({ maxConcurrent: 16, graceTurns: 10 });
+    writeProject({ maxConcurrent: 1, defaultMaxTurns: 50 });
+    const before = readFileSync(projectFile(), "utf-8");
+    expect(loadSettings()).toEqual({ maxConcurrent: 16, graceTurns: 10 });
+    expect(readFileSync(projectFile(), "utf-8")).toBe(before);
+    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 16, graceTurns: 10 });
   });
 
-  it("round-trips schedulingEnabled (true and false), and absence stays absent", () => {
-    saveSettings({ schedulingEnabled: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: false });
-
-    saveSettings({ schedulingEnabled: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: true });
-
-    // Absence — caller's "use default" signal — must not become a stored false.
-    saveSettings({}, projectDir);
-    expect(loadSettings(projectDir)).toEqual({});
+  it("ignores malformed project settings without a warning or deleting the file", () => {
+    writeGlobal({ viewerMarkdown: "all" });
+    mkdirSync(join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(projectFile(), "not json {{{");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadSettings()).toEqual({ viewerMarkdown: "all" });
+    expect(warn).not.toHaveBeenCalled();
+    expect(readFileSync(projectFile(), "utf-8")).toBe("not json {{{");
   });
 
-  it("round-trips fleetView (true and false); keeps boolean, drops non-boolean", () => {
-    saveSettings({ fleetView: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ fleetView: false });
-    saveSettings({ fleetView: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ fleetView: true });
-    writeProject({ fleetView: "on" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  it("warns for malformed global settings and preserves the file", () => {
+    writeFileSync(globalFile(), "not valid json {{{");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadSettings()).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain(`Ignoring malformed settings at ${globalFile()}`);
+    expect(readFileSync(globalFile(), "utf-8")).toBe("not valid json {{{");
   });
 
-  it("round-trips agentMentions modes; drops an unknown one", () => {
-    for (const mode of ["model", "direct", "off"] as const) {
-      saveSettings({ agentMentions: mode }, projectDir);
-      expect(loadSettings(projectDir)).toEqual({ agentMentions: mode });
-    }
-    writeProject({ agentMentions: "on" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // unknown mode dropped
-  });
-
-  it("reads the pre-mode agentMentions booleans as their modes", () => {
-    // The setting shipped as a boolean before `model` existed, so a config
-    // written then — or hand-written from the old README — must keep working.
-    // `true` meant "on", and on is now `model`.
-    writeProject({ agentMentions: true } as any);
-    expect(loadSettings(projectDir)).toEqual({ agentMentions: "model" });
-    writeProject({ agentMentions: false } as any);
-    expect(loadSettings(projectDir)).toEqual({ agentMentions: "off" });
-  });
-
-  it("round-trips rememberAgents (true and false); keeps boolean, drops non-boolean", () => {
-    saveSettings({ rememberAgents: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ rememberAgents: false });
-    saveSettings({ rememberAgents: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ rememberAgents: true });
-    writeProject({ rememberAgents: "on" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
-  });
-
-  it("ignores removed widget settings from global and project files", () => {
-    for (const widgetMode of ["all", "background", "off"]) {
-      writeGlobal({ widgetMode, showModel: true, showCost: true });
-      expect(loadSettings(projectDir)).toEqual({ showCost: true });
-      writeProject({ widgetMode, showModel: false, fleetView: false });
-      expect(loadSettings(projectDir)).toEqual({ showCost: true, fleetView: false });
-      rmSync(projectFile());
-    }
-  });
-
-  it("round-trips viewerMarkdown; keeps valid values, drops invalid", () => {
-    saveSettings({ viewerMarkdown: "off" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ viewerMarkdown: "off" });
-    saveSettings({ viewerMarkdown: "all" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ viewerMarkdown: "all" });
-    writeProject({ viewerMarkdown: "markdown" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
-  });
-
-  it("round-trips outputTranscript; drops non-boolean", () => {
-    saveSettings({ outputTranscript: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
-    saveSettings({ outputTranscript: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
-    writeProject({ outputTranscript: "no" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
-  });
-
-  it("round-trips backgroundByDefault (true and false), and absence stays absent", () => {
-    // `false` is the load-bearing case: it's how a user restores the previous
-    // foreground default, so it must survive a save/load rather than being
-    // read back as absent and re-defaulting to background.
-    saveSettings({ backgroundByDefault: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ backgroundByDefault: false });
-
-    saveSettings({ backgroundByDefault: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ backgroundByDefault: true });
-
-    saveSettings({}, projectDir);
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("sanitize drops non-boolean backgroundByDefault silently", () => {
-    writeProject({ backgroundByDefault: "yes" } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-    writeProject({ backgroundByDefault: 0 } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("round-trips worktreeIsolation; drops non-boolean", () => {
-    saveSettings({ worktreeIsolation: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
-    saveSettings({ worktreeIsolation: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: true });
-    writeProject({ worktreeIsolation: "off" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
-  });
-
-  it("round-trips reportUsage and showCost; drops non-boolean", () => {
-    saveSettings({ reportUsage: true, showCost: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ reportUsage: true, showCost: true });
-    saveSettings({ reportUsage: false, showCost: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ reportUsage: false, showCost: false });
-    // The sanitizer is an allowlist: a key it does not name is dropped, and the
-    // setting silently never applies.
-    writeProject({ reportUsage: "on", showCost: 1 } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("round-trips workflowsEnabled; drops non-boolean", () => {
-    saveSettings({ workflowsEnabled: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: true });
-    saveSettings({ workflowsEnabled: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: false });
-    writeProject({ workflowsEnabled: "on" } as any);
-    // Dropped, not coerced — a truthy string must not switch the feature on.
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("sanitize drops non-boolean schedulingEnabled silently", async () => {
-    writeProject({ schedulingEnabled: "yes" } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-    writeProject({ schedulingEnabled: 1 } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("saveSettings writes only to the project file; global is untouched", () => {
-    writeGlobal({ maxConcurrent: 16 });
-    saveSettings({ maxConcurrent: 2 }, projectDir);
-
-    // Project file contains the new value
-    expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
-    // Global file unchanged
-    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 16 });
-  });
-
-  it("saveSettings creates <cwd>/.pi/ when missing", () => {
+  it("does not warn or create files when settings are absent", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadSettings()).toEqual({});
+    expect(warn).not.toHaveBeenCalled();
+    expect(existsSync(globalFile())).toBe(false);
     expect(existsSync(join(projectDir, ".pi"))).toBe(false);
-    saveSettings({ maxConcurrent: 4 }, projectDir);
-    expect(existsSync(projectFile())).toBe(true);
   });
 
-  it("round-trips defaultMaxTurns: 0 (unlimited marker)", () => {
-    saveSettings({ defaultMaxTurns: 0 }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ defaultMaxTurns: 0 });
+  it.each([
+    "backgroundByDefault", "schedulingEnabled", "scopeModels", "strictAgentFiles",
+    "disableDefaultAgents", "fleetView", "rememberAgents", "outputTranscript",
+    "worktreeIsolation", "workflowsEnabled", "reportUsage", "showCost",
+  ])("loads %s booleans and drops other types", (key) => {
+    for (const value of [true, false]) {
+      writeGlobal({ [key]: value });
+      expect(loadSettings()).toEqual({ [key]: value });
+    }
+    for (const value of ["on", 0, null]) {
+      writeGlobal({ [key]: value });
+      expect(loadSettings()).toEqual({});
+    }
   });
 
-  it("ignores unknown extra fields on load (forward-compat)", () => {
-    writeProject({ maxConcurrent: 2, futureField: "ignored" });
-    const loaded = loadSettings(projectDir);
-    expect(loaded.maxConcurrent).toBe(2);
-    // Unknown fields are stripped by the sanitizer — old versions won't persist garbage
-    expect((loaded as Record<string, unknown>).futureField).toBeUndefined();
+  it.each(["off", "assistant", "all"])("loads viewerMarkdown %s", (viewerMarkdown) => {
+    writeGlobal({ viewerMarkdown });
+    expect(loadSettings()).toEqual({ viewerMarkdown });
   });
 
-  it("composes partial global + partial project correctly", () => {
-    writeGlobal({ graceTurns: 10 });
-    writeProject({ maxConcurrent: 2 });
-    expect(loadSettings(projectDir)).toEqual({ graceTurns: 10, maxConcurrent: 2 });
+  it.each(["model", "direct", "off"])("loads agentMentions %s", (agentMentions) => {
+    writeGlobal({ agentMentions });
+    expect(loadSettings()).toEqual({ agentMentions });
+  });
+
+  it("retains legacy mention booleans and drops unknown modes and fields", () => {
+    writeGlobal({ agentMentions: true });
+    expect(loadSettings()).toEqual({ agentMentions: "model" });
+    writeGlobal({ agentMentions: false });
+    expect(loadSettings()).toEqual({ agentMentions: "off" });
+    writeGlobal({ agentMentions: "on", viewerMarkdown: "markdown", widgetMode: "all", showModel: true, futureField: 1 });
+    expect(loadSettings()).toEqual({});
   });
 
   describe("sanitizer", () => {
     it("drops maxConcurrent < 1", () => {
-      writeProject({ maxConcurrent: 0, graceTurns: 5 });
-      expect(loadSettings(projectDir)).toEqual({ graceTurns: 5 });
+      writeGlobal({ maxConcurrent: 0, graceTurns: 5 });
+      expect(loadSettings()).toEqual({ graceTurns: 5 });
     });
 
     it("drops negative maxConcurrent", () => {
-      writeProject({ maxConcurrent: -3 });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ maxConcurrent: -3 });
+      expect(loadSettings()).toEqual({});
     });
 
     it("drops non-integer maxConcurrent (floats, NaN, strings)", () => {
-      writeProject({ maxConcurrent: 3.5 });
-      expect(loadSettings(projectDir).maxConcurrent).toBeUndefined();
-      writeProject({ maxConcurrent: "four" });
-      expect(loadSettings(projectDir).maxConcurrent).toBeUndefined();
-      writeProject({ maxConcurrent: null });
-      expect(loadSettings(projectDir).maxConcurrent).toBeUndefined();
+      writeGlobal({ maxConcurrent: 3.5 });
+      expect(loadSettings().maxConcurrent).toBeUndefined();
+      writeGlobal({ maxConcurrent: "four" });
+      expect(loadSettings().maxConcurrent).toBeUndefined();
+      writeGlobal({ maxConcurrent: null });
+      expect(loadSettings().maxConcurrent).toBeUndefined();
     });
 
     // Unlike maxConcurrent above, 0 is the DEFAULT here and means unlimited —
     // dropping it would make the default unrepresentable in the file.
     it("keeps maxConcurrentForeground: 0 (explicit unlimited)", () => {
-      writeProject({ maxConcurrentForeground: 0 });
-      expect(loadSettings(projectDir)).toEqual({ maxConcurrentForeground: 0 });
+      writeGlobal({ maxConcurrentForeground: 0 });
+      expect(loadSettings()).toEqual({ maxConcurrentForeground: 0 });
     });
 
     it("drops out-of-range or non-integer maxConcurrentForeground", () => {
       for (const bad of [-1, 1025, 1.5, "four", null]) {
-        writeProject({ maxConcurrentForeground: bad });
-        expect(loadSettings(projectDir).maxConcurrentForeground).toBeUndefined();
+        writeGlobal({ maxConcurrentForeground: bad });
+        expect(loadSettings().maxConcurrentForeground).toBeUndefined();
       }
     });
 
     it("accepts defaultMaxTurns: 0 (explicit unlimited)", () => {
-      writeProject({ defaultMaxTurns: 0 });
-      expect(loadSettings(projectDir)).toEqual({ defaultMaxTurns: 0 });
+      writeGlobal({ defaultMaxTurns: 0 });
+      expect(loadSettings()).toEqual({ defaultMaxTurns: 0 });
     });
 
     it("drops negative defaultMaxTurns", () => {
-      writeProject({ defaultMaxTurns: -1 });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ defaultMaxTurns: -1 });
+      expect(loadSettings()).toEqual({});
     });
 
     it("drops graceTurns < 1", () => {
-      writeProject({ graceTurns: 0 });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ graceTurns: 0 });
+      expect(loadSettings()).toEqual({});
     });
 
     it("keeps maxSubagentDepth 0 (nesting off) but drops negative, fractional, and over-ceiling values", () => {
-      writeProject({ maxSubagentDepth: 0 });
-      expect(loadSettings(projectDir)).toEqual({ maxSubagentDepth: 0 });
-      writeProject({ maxSubagentDepth: -1 });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ maxSubagentDepth: 1.5 });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ maxSubagentDepth: 17 });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ maxSubagentDepth: 0 });
+      expect(loadSettings()).toEqual({ maxSubagentDepth: 0 });
+      writeGlobal({ maxSubagentDepth: -1 });
+      expect(loadSettings()).toEqual({});
+      writeGlobal({ maxSubagentDepth: 1.5 });
+      expect(loadSettings()).toEqual({});
+      writeGlobal({ maxSubagentDepth: 17 });
+      expect(loadSettings()).toEqual({});
     });
 
     it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
@@ -331,131 +185,130 @@ describe("settings persistence", () => {
       // string stays an agent name, so a mistaken "off" fails loudly at dispatch
       // instead of meaning one thing here and another in the resolver.
       for (const spelling of ["none", "NONE", " none ", false]) {
-        writeProject({ fallbackSubagent: spelling });
-        expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+        writeGlobal({ fallbackSubagent: spelling });
+        expect(loadSettings().fallbackSubagent?.toLowerCase()).toBe("none");
       }
-      writeProject({ fallbackSubagent: "off" });
-      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+      writeGlobal({ fallbackSubagent: "off" });
+      expect(loadSettings()).toEqual({ fallbackSubagent: "off" });
     });
 
     it("drops values that aren't a string or `false`, without coercing them", () => {
       // String(["none"]) is "none" — coercing would silently enable strict mode.
       for (const junk of [["none"], null, 42, true, {}]) {
-        writeProject({ fallbackSubagent: junk });
-        expect(loadSettings(projectDir)).toEqual({});
+        writeGlobal({ fallbackSubagent: junk });
+        expect(loadSettings()).toEqual({});
       }
     });
 
     it("keeps a named fallback agent and drops non-strings", () => {
-      writeProject({ fallbackSubagent: "  my-router  " });
-      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
-      writeProject({ fallbackSubagent: 42 });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ fallbackSubagent: "   " });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ fallbackSubagent: "  my-router  " });
+      expect(loadSettings()).toEqual({ fallbackSubagent: "my-router" });
+      writeGlobal({ fallbackSubagent: 42 });
+      expect(loadSettings()).toEqual({});
+      writeGlobal({ fallbackSubagent: "   " });
+      expect(loadSettings()).toEqual({});
     });
 
     it("drops invalid defaultJoinMode values", () => {
-      writeProject({ defaultJoinMode: "invalid" });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ defaultJoinMode: 42 });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ defaultJoinMode: "" });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeGlobal({ defaultJoinMode: "invalid" });
+      expect(loadSettings()).toEqual({});
+      writeGlobal({ defaultJoinMode: 42 });
+      expect(loadSettings()).toEqual({});
+      writeGlobal({ defaultJoinMode: "" });
+      expect(loadSettings()).toEqual({});
     });
 
     it("accepts all three valid join modes", () => {
       for (const mode of ["async", "group", "smart"] as const) {
-        writeProject({ defaultJoinMode: mode });
-        expect(loadSettings(projectDir)).toEqual({ defaultJoinMode: mode });
+        writeGlobal({ defaultJoinMode: mode });
+        expect(loadSettings()).toEqual({ defaultJoinMode: mode });
       }
     });
 
     it("accepts scopeModels boolean (true and false)", () => {
-      writeProject({ scopeModels: true });
-      expect(loadSettings(projectDir)).toEqual({ scopeModels: true });
-      writeProject({ scopeModels: false });
-      expect(loadSettings(projectDir)).toEqual({ scopeModels: false });
+      writeGlobal({ scopeModels: true });
+      expect(loadSettings()).toEqual({ scopeModels: true });
+      writeGlobal({ scopeModels: false });
+      expect(loadSettings()).toEqual({ scopeModels: false });
     });
 
     it("accepts strictAgentFiles boolean (true and false)", () => {
-      writeProject({ strictAgentFiles: true });
-      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
-      writeProject({ strictAgentFiles: false });
-      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+      writeGlobal({ strictAgentFiles: true });
+      expect(loadSettings()).toEqual({ strictAgentFiles: true });
+      writeGlobal({ strictAgentFiles: false });
+      expect(loadSettings()).toEqual({ strictAgentFiles: false });
     });
 
     it("drops non-boolean strictAgentFiles", () => {
-      writeProject({ strictAgentFiles: "yes" });
-      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
-      writeProject({ strictAgentFiles: 1 });
-      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+      writeGlobal({ strictAgentFiles: "yes" });
+      expect(loadSettings().strictAgentFiles).toBeUndefined();
+      writeGlobal({ strictAgentFiles: 1 });
+      expect(loadSettings().strictAgentFiles).toBeUndefined();
     });
 
     it("drops non-boolean scopeModels", () => {
-      writeProject({ scopeModels: "yes" });
-      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
-      writeProject({ scopeModels: 1 });
-      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
-      writeProject({ scopeModels: null });
-      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+      writeGlobal({ scopeModels: "yes" });
+      expect(loadSettings().scopeModels).toBeUndefined();
+      writeGlobal({ scopeModels: 1 });
+      expect(loadSettings().scopeModels).toBeUndefined();
+      writeGlobal({ scopeModels: null });
+      expect(loadSettings().scopeModels).toBeUndefined();
     });
 
     it("accepts disableDefaultAgents boolean (true and false)", () => {
-      writeProject({ disableDefaultAgents: true });
-      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
-      writeProject({ disableDefaultAgents: false });
-      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: false });
+      writeGlobal({ disableDefaultAgents: true });
+      expect(loadSettings()).toEqual({ disableDefaultAgents: true });
+      writeGlobal({ disableDefaultAgents: false });
+      expect(loadSettings()).toEqual({ disableDefaultAgents: false });
     });
 
     it("drops non-boolean disableDefaultAgents", () => {
-      writeProject({ disableDefaultAgents: "yes" });
-      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
-      writeProject({ disableDefaultAgents: 1 });
-      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
-      writeProject({ disableDefaultAgents: null });
-      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+      writeGlobal({ disableDefaultAgents: "yes" });
+      expect(loadSettings().disableDefaultAgents).toBeUndefined();
+      writeGlobal({ disableDefaultAgents: 1 });
+      expect(loadSettings().disableDefaultAgents).toBeUndefined();
+      writeGlobal({ disableDefaultAgents: null });
+      expect(loadSettings().disableDefaultAgents).toBeUndefined();
     });
 
     it("accepts all valid toolDescriptionMode values", () => {
       for (const mode of ["full", "compact", "custom"] as const) {
-        writeProject({ toolDescriptionMode: mode });
-        expect(loadSettings(projectDir)).toEqual({ toolDescriptionMode: mode });
+        writeGlobal({ toolDescriptionMode: mode });
+        expect(loadSettings()).toEqual({ toolDescriptionMode: mode });
       }
     });
 
     it("drops invalid toolDescriptionMode", () => {
-      writeProject({ toolDescriptionMode: "tiny" });
-      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
-      writeProject({ toolDescriptionMode: true });
-      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
-      writeProject({ toolDescriptionMode: null });
-      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
+      writeGlobal({ toolDescriptionMode: "tiny" });
+      expect(loadSettings().toolDescriptionMode).toBeUndefined();
+      writeGlobal({ toolDescriptionMode: true });
+      expect(loadSettings().toolDescriptionMode).toBeUndefined();
+      writeGlobal({ toolDescriptionMode: null });
+      expect(loadSettings().toolDescriptionMode).toBeUndefined();
     });
 
     it("returns {} when the JSON root is not an object (array, string, null)", () => {
-      mkdirSync(join(projectDir, ".pi"), { recursive: true });
-      writeFileSync(projectFile(), '["not", "an", "object"]');
-      expect(loadSettings(projectDir)).toEqual({});
-      writeFileSync(projectFile(), '"just a string"');
-      expect(loadSettings(projectDir)).toEqual({});
-      writeFileSync(projectFile(), "null");
-      expect(loadSettings(projectDir)).toEqual({});
+      writeFileSync(globalFile(), '["not", "an", "object"]');
+      expect(loadSettings()).toEqual({});
+      writeFileSync(globalFile(), '"just a string"');
+      expect(loadSettings()).toEqual({});
+      writeFileSync(globalFile(), "null");
+      expect(loadSettings()).toEqual({});
     });
 
     it("keeps valid fields while dropping invalid siblings", () => {
-      writeProject({
+      writeGlobal({
         maxConcurrent: 4, // ok
         defaultMaxTurns: -5, // dropped
         graceTurns: 3, // ok
         defaultJoinMode: "nope", // dropped
       });
-      expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 4, graceTurns: 3 });
+      expect(loadSettings()).toEqual({ maxConcurrent: 4, graceTurns: 3 });
     });
 
     it("accepts values at the ceiling (maxConcurrent=1024, defaultMaxTurns=10000, graceTurns=1000)", () => {
-      writeProject({ maxConcurrent: 1024, defaultMaxTurns: 10_000, graceTurns: 1_000 });
-      expect(loadSettings(projectDir)).toEqual({
+      writeGlobal({ maxConcurrent: 1024, defaultMaxTurns: 10_000, graceTurns: 1_000 });
+      expect(loadSettings()).toEqual({
         maxConcurrent: 1024,
         defaultMaxTurns: 10_000,
         graceTurns: 1_000,
@@ -463,59 +316,17 @@ describe("settings persistence", () => {
     });
 
     it("drops values above the ceiling", () => {
-      writeProject({ maxConcurrent: 1025 });
-      expect(loadSettings(projectDir).maxConcurrent).toBeUndefined();
-      writeProject({ defaultMaxTurns: 10_001 });
-      expect(loadSettings(projectDir).defaultMaxTurns).toBeUndefined();
-      writeProject({ graceTurns: 1_001 });
-      expect(loadSettings(projectDir).graceTurns).toBeUndefined();
+      writeGlobal({ maxConcurrent: 1025 });
+      expect(loadSettings().maxConcurrent).toBeUndefined();
+      writeGlobal({ defaultMaxTurns: 10_001 });
+      expect(loadSettings().defaultMaxTurns).toBeUndefined();
+      writeGlobal({ graceTurns: 1_001 });
+      expect(loadSettings().graceTurns).toBeUndefined();
     });
 
     it("drops absurdly large values (e.g. 1e6)", () => {
-      writeProject({ maxConcurrent: 1_000_000, defaultMaxTurns: 1_000_000, graceTurns: 1_000_000 });
-      expect(loadSettings(projectDir)).toEqual({});
-    });
-  });
-
-  describe("save result + corrupt-file warning", () => {
-    it("saveSettings returns true on success", () => {
-      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
-      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
-    });
-
-    it("saveSettings returns false when the target dir cannot be created", () => {
-      // Place a regular file where the parent of the settings file would go —
-      // mkdirSync + writeFileSync both fail with ENOTDIR / EEXIST.
-      const filePosingAsCwd = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
-      writeFileSync(filePosingAsCwd, "");
-      try {
-        expect(saveSettings({ maxConcurrent: 1 }, filePosingAsCwd)).toBe(false);
-      } finally {
-        rmSync(filePosingAsCwd, { force: true });
-      }
-    });
-
-    it("warns to console.warn when an existing file is malformed", () => {
-      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      mkdirSync(join(projectDir, ".pi"), { recursive: true });
-      writeFileSync(projectFile(), "not valid json {{{");
-      try {
-        expect(loadSettings(projectDir)).toEqual({});
-        expect(spy).toHaveBeenCalledTimes(1);
-        expect(String(spy.mock.calls[0][0])).toMatch(/Ignoring malformed settings/);
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    it("does NOT warn when a file is simply missing", () => {
-      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        expect(loadSettings(projectDir)).toEqual({});
-        expect(spy).not.toHaveBeenCalled();
-      } finally {
-        spy.mockRestore();
-      }
+      writeGlobal({ maxConcurrent: 1_000_000, defaultMaxTurns: 1_000_000, graceTurns: 1_000_000 });
+      expect(loadSettings()).toEqual({});
     });
   });
 
@@ -745,22 +556,6 @@ describe("settings persistence", () => {
     });
   });
 
-  describe("persistToastFor", () => {
-    it("returns info-level toast with the plain message on success", () => {
-      expect(persistToastFor("Max concurrency set to 7", true)).toEqual({
-        message: "Max concurrency set to 7",
-        level: "info",
-      });
-    });
-
-    it("returns warning-level toast with session-only suffix on failure", () => {
-      expect(persistToastFor("Max concurrency set to 7", false)).toEqual({
-        message: "Max concurrency set to 7 (session only; failed to persist)",
-        level: "warning",
-      });
-    });
-  });
-
   describe("applyAndEmitLoaded", () => {
     let appliers: SettingsAppliers;
 
@@ -791,12 +586,12 @@ describe("settings persistence", () => {
       };
     });
 
-    it("loads, applies, and emits subagents:settings_loaded with merged settings", () => {
-      writeGlobal({ maxConcurrent: 16 });
-      writeProject({ graceTurns: 7 });
+    it("loads, sanitizes, applies, and emits global settings", () => {
+      writeGlobal({ maxConcurrent: 16, graceTurns: 7, showCost: "invalid" });
+      writeProject({ maxConcurrent: 2, graceTurns: 1 });
       const emit = vi.fn();
 
-      const result = applyAndEmitLoaded(appliers, emit, projectDir);
+      const result = applyAndEmitLoaded(appliers, emit);
 
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(16);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
@@ -810,10 +605,10 @@ describe("settings persistence", () => {
       expect(result).toEqual({ maxConcurrent: 16, graceTurns: 7 });
     });
 
-    it("still emits the event when both files are missing (payload carries {})", () => {
+    it("still emits the event when the global file is missing (payload carries {})", () => {
       const emit = vi.fn();
 
-      const result = applyAndEmitLoaded(appliers, emit, projectDir);
+      const result = applyAndEmitLoaded(appliers, emit);
 
       expect(emit).toHaveBeenCalledWith("subagents:settings_loaded", { settings: {} });
       expect(result).toEqual({});
@@ -825,45 +620,4 @@ describe("settings persistence", () => {
     });
   });
 
-  describe("saveAndEmitChanged", () => {
-    it("persists, emits with persisted=true, and returns info toast on success", () => {
-      const emit = vi.fn();
-      const snapshot = { maxConcurrent: 5, graceTurns: 2 };
-
-      const toast = saveAndEmitChanged(snapshot, "Max concurrency set to 5", emit, projectDir);
-
-      expect(emit).toHaveBeenCalledTimes(1);
-      expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
-        settings: snapshot,
-        persisted: true,
-      });
-      expect(toast).toEqual({ message: "Max concurrency set to 5", level: "info" });
-      // File actually written
-      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual(snapshot);
-    });
-
-    it("emits with persisted=false and returns warning toast on save failure", () => {
-      const filePosingAsCwd = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
-      writeFileSync(filePosingAsCwd, "");
-      const emit = vi.fn();
-      try {
-        const toast = saveAndEmitChanged(
-          { maxConcurrent: 5 },
-          "Max concurrency set to 5",
-          emit,
-          filePosingAsCwd,
-        );
-        expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
-          settings: { maxConcurrent: 5 },
-          persisted: false,
-        });
-        expect(toast).toEqual({
-          message: "Max concurrency set to 5 (session only; failed to persist)",
-          level: "warning",
-        });
-      } finally {
-        rmSync(filePosingAsCwd, { force: true });
-      }
-    });
-  });
 });

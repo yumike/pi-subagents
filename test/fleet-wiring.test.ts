@@ -88,7 +88,7 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     // async join → completion routes straight to sendIndividualNudge (no batch
     // debounce), so fleet.onAgentFinished fires synchronously on the result.
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "async" }));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "async" }));
     process.chdir(tmpDir);
   });
 

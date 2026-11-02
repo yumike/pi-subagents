@@ -13,6 +13,8 @@
  * The job is read back through the real ScheduleStore rather than by spying on
  * `addJob`, so the assertion covers persistence too.
  */
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -218,11 +220,11 @@ describe("Agent tool → schedule restrictions", () => {
     }
   });
 
-  it("refuses scheduling entirely when the project disabled it", async () => {
+  it("refuses scheduling entirely when globally disabled", async () => {
     const { reply, jobCount, restore } = await scheduleCall({}, { schedulingEnabled: false });
     try {
       expect(reply).toBe(
-        "Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.",
+        `Scheduling is disabled. Set "schedulingEnabled": true in ${join(getAgentDir(), "subagents.json")} and restart pi.`,
       );
       expect(jobCount).toBe(0);
     } finally {

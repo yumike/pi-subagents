@@ -39,7 +39,7 @@ let originalAgentDir: string | undefined;
 let originalHome: string | undefined;
 
 function writeSettings(settings: Record<string, unknown>): void {
-  const dir = join(cwd, ".pi");
+  const dir = process.env.PI_CODING_AGENT_DIR!;
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "subagents.json"), JSON.stringify(settings));
 }

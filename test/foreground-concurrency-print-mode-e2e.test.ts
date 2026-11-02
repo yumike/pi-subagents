@@ -16,7 +16,7 @@
  * proves the detector can see parallelism at all, so `maxInFlight === 1` is a
  * result rather than a broken probe.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
@@ -46,14 +46,9 @@ describe.skipIf(LIVE)("maxConcurrentForeground e2e (real pi agent loop)", () => 
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  function projectDir(settings: Record<string, unknown>): string {
+  function projectDir(): string {
     const dir = mkdtempSync(join(tmpdir(), "pi-fgconc-e2e-"));
     tmpDirs.push(dir);
-    mkdirSync(join(dir, ".pi"), { recursive: true });
-    writeFileSync(
-      join(dir, ".pi", "subagents.json"),
-      JSON.stringify({ outputTranscript: false, ...settings }),
-    );
     return dir;
   }
 
@@ -69,7 +64,8 @@ describe.skipIf(LIVE)("maxConcurrentForeground e2e (real pi agent loop)", () => 
 
     run = await runPrintMode({
       prompt: "Delegate two independent jobs and report both.",
-      cwd: projectDir(settings),
+      cwd: projectDir(),
+      subagentsSettings: { outputTranscript: false, ...settings },
       live: false, // scripted on purpose: a real model may not emit both calls
       respond: async (context: TranscriptContext) => {
         const isParent = getCurrentTools(context.messages).some(t => t.name === "Agent");

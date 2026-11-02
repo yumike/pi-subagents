@@ -167,7 +167,7 @@ export class ConversationViewer implements Component, Focusable {
   private composer: Input | undefined;
   /** Resolved once: pi's Markdown theme is fixed for the life of the process. */
   private readonly markdownTheme: MarkdownTheme;
-  /** Set by the `m` key. Wins over the setting so `m` works without a persist hook. */
+  /** Set by the `m` key, including when no shared-mode callback is provided. */
   private markdownModeOverride: ViewerMarkdownMode | undefined;
   /**
    * One `Markdown` per message, so its own text/width cache does the work. A
@@ -203,8 +203,8 @@ export class ConversationViewer implements Component, Focusable {
      */
     private viewerMarkdown?: () => ViewerMarkdownMode,
     /**
-     * Persist a mode chosen with `m`, so the key and `/agents → Settings` mean
-     * the same thing. Omitted → `m` still cycles, viewer-locally.
+     * Share a mode chosen with `m` in memory across viewer opens.
+     * Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
     /** Pi's fullscreen scrollbar preference, captured when the observer opens. */

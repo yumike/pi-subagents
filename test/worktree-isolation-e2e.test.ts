@@ -17,7 +17,7 @@
  * env var to leave it alone — the pre-publish smoke sets PI_E2E_LIVE globally.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/pi-ai";
@@ -151,11 +151,9 @@ describe("worktree isolation e2e (real git, real pi-mono, faux model)", () => {
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });
 
-  it("downgrades to the main checkout when the project set worktreeIsolation: false", async () => {
+  it("downgrades to the main checkout when global worktreeIsolation is false", async () => {
     const repo = initGitRepo();
     repos.push(repo);
-    mkdirSync(join(repo, ".pi"), { recursive: true });
-    writeFileSync(join(repo, ".pi", "subagents.json"), JSON.stringify({ worktreeIsolation: false }));
 
     // The caller passes `isolation: "worktree"` even though the setting drops
     // the parameter from the schema — exactly what a model holding a cached tool
@@ -168,6 +166,7 @@ describe("worktree isolation e2e (real git, real pi-mono, faux model)", () => {
     // resolver entirely. This test pins the behaviour and goes red when both are
     // gone; each gate is pinned individually by its own unit test.
     run = await runPrintMode({
+      subagentsSettings: { worktreeIsolation: false },
       prompt: "Delegate the work.",
       cwd: repo,
       respond: respondSpawning("worktree"),

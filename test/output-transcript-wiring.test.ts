@@ -77,7 +77,7 @@ describe("output_transcript agent wiring", () => {
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.HOME = agentDir;
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     mkdirSync(join(agentDir, "agents"), { recursive: true });
     process.chdir(cwd);
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
@@ -156,9 +156,9 @@ describe("output_transcript agent wiring", () => {
     await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
   });
 
-  it("suppresses the transcript project-wide when subagents.json sets outputTranscript false", async () => {
-    // A plain default agent (no frontmatter) inherits the project default.
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
+  it("suppresses the transcript globally when subagents.json sets outputTranscript false", async () => {
+    // A plain default agent (no frontmatter) inherits the global default.
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 
@@ -176,9 +176,9 @@ describe("output_transcript agent wiring", () => {
     await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
   });
 
-  it("lets agent frontmatter output_transcript true override a project outputTranscript false", async () => {
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
-    writeFileSync(join(agentDir, "agents", "audited.md"), `---\ndescription: Always keeps a transcript\noutput_transcript: true\n---\n\nWrite a transcript regardless of the project default.`);
+  it("lets agent frontmatter output_transcript true override a global outputTranscript false", async () => {
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
+    writeFileSync(join(agentDir, "agents", "audited.md"), `---\ndescription: Always keeps a transcript\noutput_transcript: true\n---\n\nWrite a transcript regardless of the global default.`);
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 

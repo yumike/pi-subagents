@@ -116,7 +116,7 @@ export function decideWorkflowCollision(input: {
     message:
       `Another extension (${source}) already provides a "${foreign.name}" tool, so this extension's ` +
       "workflows are disabled for this session to avoid offering the model two orchestrators. " +
-      'Set `"workflowsEnabled": true` in .pi/subagents.json to keep both.',
+      'Set `"workflowsEnabled": true` in your global subagents.json, then reload the extension or restart pi to keep both.',
     // Case 1: ours never reached the registry, so there is nothing to withdraw.
     withdraw: !tookOurName,
   };

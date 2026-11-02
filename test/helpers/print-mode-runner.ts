@@ -41,7 +41,7 @@
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,6 +66,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { SubagentsSettings } from "../../src/settings.js";
 import { fauxModelBackend } from "./faux-model-backend.js";
 import { getModel, registerFauxProvider } from "./pi-ai.js";
 
@@ -102,6 +103,8 @@ export interface RunPrintModeOptions {
    * removes. Pass a fixtures dir to make project custom agents discoverable.
    */
   cwd?: string;
+  /** Operational settings written only into the isolated temporary agent dir. */
+  subagentsSettings?: SubagentsSettings;
   /** Parent host system prompt. Default: a minimal orchestrator prompt. */
   systemPrompt?: string;
   /**
@@ -254,6 +257,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const live = isLive(options);
   const isolateGlobals = options.isolateGlobals ?? !live;
   const timeoutMs = options.timeoutMs ?? 30_000;
+  if (options.subagentsSettings && !isolateGlobals) {
+    throw new Error("subagentsSettings requires isolateGlobals to avoid changing user configuration");
+  }
 
   // --- working dir (own it only if we created it) ---
   const ownsCwd = options.cwd == null;
@@ -338,6 +344,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   // --- build the parent host session with the extension loaded ---
   // Resolved after globals are isolated, so it honors the hermetic dir.
   const agentDir = getAgentDir();
+  if (options.subagentsSettings) {
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify(options.subagentsSettings));
+  }
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
