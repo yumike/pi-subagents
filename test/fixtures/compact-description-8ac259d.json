@@ -1,0 +1,330 @@
+{
+  "baseCommit": "8ac259d0c76ccbe96b3fb261f65e60e0ed681366",
+  "customAgents": {
+    "Explore": "---\ndescription: Custom scout! More detail must survive in workflows.\ntools: read, grep\nmodel: provider/scout-20260101\n---\nScout.\n",
+    "literal": "---\ndescription: Literal $& costs. Later $` and $' and $$ and {{agentDir}} stay literal.\ntools: none\nextensions: false\n---\nRead.\n",
+    "disabled": "---\ndescription: Hidden agent. Never advertised.\nenabled: false\n---\nHidden.\n"
+  },
+  "cases": [
+    {
+      "custom": false,
+      "worktreeIsolation": true,
+      "description": "Launch an autonomous agent for complex, multi-step tasks. Agent types:\n- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. (Tools: *)\n- Explore: Fast read-only search agent for locating code. (Tools: read, bash, grep, find, ls)\n- Plan: Software architect agent for designing implementation plans. (Tools: read, bash, grep, find, ls)\n\nCustom agents: .pi/agents/<name>.md (project) or <agentDir>/agents/<name>.md (global).\n\nNotes:\n- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.\n- Parallel work: one message, multiple Agent calls — they run concurrently.\n- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.\n- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.\n- resume continues a previous agent by ID; steer_subagent messages a running one.\n- isolation: \"worktree\" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "description",
+          "subagent_type"
+        ],
+        "properties": {
+          "prompt": {
+            "description": "The task for the agent to perform.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short (3-5 word) description of the task (shown in UI).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional memorable name for this agent, e.g. \"auth-audit\", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.",
+            "type": "string"
+          },
+          "subagent_type": {
+            "description": "The type of specialized agent to use. Available types: general-purpose, Explore, Plan. Custom agents from .pi/agents/*.md (project) or <agentDir>/agents/*.md (global) are also available.",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model for this delegated task. Choose based on the task's complexity, required capabilities, and cost/latency trade-offs — not merely the parent's model. Accepts \"provider/modelId\" or a fuzzy name. If omitted, inherits the configured agent model or the parent's model. Agent-file model pins take precedence.",
+            "type": "string"
+          },
+          "thinking": {
+            "description": "Thinking level: off, minimal, low, medium, high, xhigh, max. Reasoning effort for this delegated task. Choose independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification. If omitted, inherits the agent's configured effort or the parent's. Agent-file thinking pins take precedence.",
+            "type": "string"
+          },
+          "max_turns": {
+            "description": "Maximum number of agentic turns per run, including each resume. Frontmatter takes precedence; 0 means unlimited. Omit to inherit the configured or stored budget.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "run_in_background": {
+            "description": "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+            "type": "boolean"
+          },
+          "resume": {
+            "description": "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. Each resume gets a fresh max_turns budget, governed by the existing agent's type, not subagent_type. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+            "type": "string"
+          },
+          "isolated": {
+            "description": "If true, agent gets no extension/MCP tools — only built-in tools.",
+            "type": "boolean"
+          },
+          "inherit_context": {
+            "description": "If true, fork parent conversation into the agent. Default: false (fresh context).",
+            "type": "boolean"
+          },
+          "isolation": {
+            "description": "Isolation mode. Default \"off\". \"off\" runs the agent in the current checkout, the same as omitting the field. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo (a copy cannot see uncommitted or staged changes in the main checkout).",
+            "anyOf": [
+              {
+                "const": "off",
+                "type": "string"
+              },
+              {
+                "const": "worktree",
+                "type": "string"
+              }
+            ]
+          },
+          "schedule": {
+            "description": "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron (\"0 0 9 * * 1\" = 9am Mon), interval (\"5m\"/\"1h\"), one-shot (\"+10m\" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.",
+            "type": "string"
+          }
+        }
+      },
+      "workflowDescriptionSha256": "35ecad5f67830f8d7564affeee37bcf807bd4245c268142e91bf5a45f5d33a0c"
+    },
+    {
+      "custom": false,
+      "worktreeIsolation": false,
+      "description": "Launch an autonomous agent for complex, multi-step tasks. Agent types:\n- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. (Tools: *)\n- Explore: Fast read-only search agent for locating code. (Tools: read, bash, grep, find, ls)\n- Plan: Software architect agent for designing implementation plans. (Tools: read, bash, grep, find, ls)\n\nCustom agents: .pi/agents/<name>.md (project) or <agentDir>/agents/<name>.md (global).\n\nNotes:\n- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.\n- Parallel work: one message, multiple Agent calls — they run concurrently.\n- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.\n- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.\n- resume continues a previous agent by ID; steer_subagent messages a running one.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "description",
+          "subagent_type"
+        ],
+        "properties": {
+          "prompt": {
+            "description": "The task for the agent to perform.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short (3-5 word) description of the task (shown in UI).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional memorable name for this agent, e.g. \"auth-audit\", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.",
+            "type": "string"
+          },
+          "subagent_type": {
+            "description": "The type of specialized agent to use. Available types: general-purpose, Explore, Plan. Custom agents from .pi/agents/*.md (project) or <agentDir>/agents/*.md (global) are also available.",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model for this delegated task. Choose based on the task's complexity, required capabilities, and cost/latency trade-offs — not merely the parent's model. Accepts \"provider/modelId\" or a fuzzy name. If omitted, inherits the configured agent model or the parent's model. Agent-file model pins take precedence.",
+            "type": "string"
+          },
+          "thinking": {
+            "description": "Thinking level: off, minimal, low, medium, high, xhigh, max. Reasoning effort for this delegated task. Choose independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification. If omitted, inherits the agent's configured effort or the parent's. Agent-file thinking pins take precedence.",
+            "type": "string"
+          },
+          "max_turns": {
+            "description": "Maximum number of agentic turns per run, including each resume. Frontmatter takes precedence; 0 means unlimited. Omit to inherit the configured or stored budget.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "run_in_background": {
+            "description": "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+            "type": "boolean"
+          },
+          "resume": {
+            "description": "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. Each resume gets a fresh max_turns budget, governed by the existing agent's type, not subagent_type. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+            "type": "string"
+          },
+          "isolated": {
+            "description": "If true, agent gets no extension/MCP tools — only built-in tools.",
+            "type": "boolean"
+          },
+          "inherit_context": {
+            "description": "If true, fork parent conversation into the agent. Default: false (fresh context).",
+            "type": "boolean"
+          },
+          "schedule": {
+            "description": "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron (\"0 0 9 * * 1\" = 9am Mon), interval (\"5m\"/\"1h\"), one-shot (\"+10m\" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.",
+            "type": "string"
+          }
+        }
+      },
+      "workflowDescriptionSha256": "35ecad5f67830f8d7564affeee37bcf807bd4245c268142e91bf5a45f5d33a0c"
+    },
+    {
+      "custom": true,
+      "worktreeIsolation": true,
+      "description": "Launch an autonomous agent for complex, multi-step tasks. Agent types:\n- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. (Tools: *)\n- Explore: Custom scout! (Tools: read, grep)\n- Plan: Software architect agent for designing implementation plans. (Tools: read, bash, grep, find, ls)\n- literal: Literal $& costs. (Tools: none)\n\nCustom agents: .pi/agents/<name>.md (project) or <agentDir>/agents/<name>.md (global).\n\nNotes:\n- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.\n- Parallel work: one message, multiple Agent calls — they run concurrently.\n- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.\n- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.\n- resume continues a previous agent by ID; steer_subagent messages a running one.\n- isolation: \"worktree\" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "description",
+          "subagent_type"
+        ],
+        "properties": {
+          "prompt": {
+            "description": "The task for the agent to perform.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short (3-5 word) description of the task (shown in UI).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional memorable name for this agent, e.g. \"auth-audit\", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.",
+            "type": "string"
+          },
+          "subagent_type": {
+            "description": "The type of specialized agent to use. Available types: general-purpose, Explore, Plan, literal. Custom agents from .pi/agents/*.md (project) or <agentDir>/agents/*.md (global) are also available.",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model for this delegated task. Choose based on the task's complexity, required capabilities, and cost/latency trade-offs — not merely the parent's model. Accepts \"provider/modelId\" or a fuzzy name. If omitted, inherits the configured agent model or the parent's model. Agent-file model pins take precedence.",
+            "type": "string"
+          },
+          "thinking": {
+            "description": "Thinking level: off, minimal, low, medium, high, xhigh, max. Reasoning effort for this delegated task. Choose independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification. If omitted, inherits the agent's configured effort or the parent's. Agent-file thinking pins take precedence.",
+            "type": "string"
+          },
+          "max_turns": {
+            "description": "Maximum number of agentic turns per run, including each resume. Frontmatter takes precedence; 0 means unlimited. Omit to inherit the configured or stored budget.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "run_in_background": {
+            "description": "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+            "type": "boolean"
+          },
+          "resume": {
+            "description": "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. Each resume gets a fresh max_turns budget, governed by the existing agent's type, not subagent_type. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+            "type": "string"
+          },
+          "isolated": {
+            "description": "If true, agent gets no extension/MCP tools — only built-in tools.",
+            "type": "boolean"
+          },
+          "inherit_context": {
+            "description": "If true, fork parent conversation into the agent. Default: false (fresh context).",
+            "type": "boolean"
+          },
+          "isolation": {
+            "description": "Isolation mode. Default \"off\". \"off\" runs the agent in the current checkout, the same as omitting the field. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo (a copy cannot see uncommitted or staged changes in the main checkout).",
+            "anyOf": [
+              {
+                "const": "off",
+                "type": "string"
+              },
+              {
+                "const": "worktree",
+                "type": "string"
+              }
+            ]
+          },
+          "schedule": {
+            "description": "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron (\"0 0 9 * * 1\" = 9am Mon), interval (\"5m\"/\"1h\"), one-shot (\"+10m\" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.",
+            "type": "string"
+          }
+        }
+      },
+      "workflowDescriptionSha256": "850345fd1f8059d10aea60d9028993718c2f4ad82c48e1ebf03c1366eddfbbea"
+    },
+    {
+      "custom": true,
+      "worktreeIsolation": false,
+      "description": "Launch an autonomous agent for complex, multi-step tasks. Agent types:\n- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. (Tools: *)\n- Explore: Custom scout! (Tools: read, grep)\n- Plan: Software architect agent for designing implementation plans. (Tools: read, bash, grep, find, ls)\n- literal: Literal $& costs. (Tools: none)\n\nCustom agents: .pi/agents/<name>.md (project) or <agentDir>/agents/<name>.md (global).\n\nNotes:\n- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.\n- Parallel work: one message, multiple Agent calls — they run concurrently.\n- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.\n- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.\n- resume continues a previous agent by ID; steer_subagent messages a running one.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "description",
+          "subagent_type"
+        ],
+        "properties": {
+          "prompt": {
+            "description": "The task for the agent to perform.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short (3-5 word) description of the task (shown in UI).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional memorable name for this agent, e.g. \"auth-audit\", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.",
+            "type": "string"
+          },
+          "subagent_type": {
+            "description": "The type of specialized agent to use. Available types: general-purpose, Explore, Plan, literal. Custom agents from .pi/agents/*.md (project) or <agentDir>/agents/*.md (global) are also available.",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model for this delegated task. Choose based on the task's complexity, required capabilities, and cost/latency trade-offs — not merely the parent's model. Accepts \"provider/modelId\" or a fuzzy name. If omitted, inherits the configured agent model or the parent's model. Agent-file model pins take precedence.",
+            "type": "string"
+          },
+          "thinking": {
+            "description": "Thinking level: off, minimal, low, medium, high, xhigh, max. Reasoning effort for this delegated task. Choose independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification. If omitted, inherits the agent's configured effort or the parent's. Agent-file thinking pins take precedence.",
+            "type": "string"
+          },
+          "max_turns": {
+            "description": "Maximum number of agentic turns per run, including each resume. Frontmatter takes precedence; 0 means unlimited. Omit to inherit the configured or stored budget.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "run_in_background": {
+            "description": "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+            "type": "boolean"
+          },
+          "resume": {
+            "description": "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. Each resume gets a fresh max_turns budget, governed by the existing agent's type, not subagent_type. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+            "type": "string"
+          },
+          "isolated": {
+            "description": "If true, agent gets no extension/MCP tools — only built-in tools.",
+            "type": "boolean"
+          },
+          "inherit_context": {
+            "description": "If true, fork parent conversation into the agent. Default: false (fresh context).",
+            "type": "boolean"
+          },
+          "schedule": {
+            "description": "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron (\"0 0 9 * * 1\" = 9am Mon), interval (\"5m\"/\"1h\"), one-shot (\"+10m\" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.",
+            "type": "string"
+          }
+        }
+      },
+      "workflowDescriptionSha256": "850345fd1f8059d10aea60d9028993718c2f4ad82c48e1ebf03c1366eddfbbea"
+    }
+  ],
+  "workflowParameters": {
+    "type": "object",
+    "properties": {
+      "script": {
+        "maxLength": 524288,
+        "description": "Inline workflow source. Must begin with `export const meta = { name, description }`.",
+        "type": "string"
+      },
+      "scriptPath": {
+        "description": "Path to a workflow script file, absolute or relative to the project. Takes precedence over `script` — this is how you re-run an edited workflow.",
+        "type": "string"
+      },
+      "name": {
+        "description": "Name of a saved workflow — `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Lowest precedence: `scriptPath` and `script` both win over it.",
+        "type": "string"
+      },
+      "args": {
+        "description": "Exposed to the script as the global `args`, verbatim. Must be JSON-shaped."
+      },
+      "resumeFromRunId": {
+        "pattern": "^wf_[a-z0-9-]{6,}$",
+        "description": "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs.",
+        "type": "string"
+      },
+      "title": {
+        "description": "Ignored — set the workflow title in the script's `meta` block.",
+        "type": "string"
+      },
+      "description": {
+        "description": "Ignored — set the workflow description in the script's `meta` block.",
+        "type": "string"
+      }
+    }
+  }
+}

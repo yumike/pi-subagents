@@ -23,9 +23,8 @@
  * Additions with no upstream counterpart: `gate`, `resume`, `effort: "minimal"`,
  * the saved-workflow directories, and the reject-unknown-options guarantee.
  *
- * Kept out of index.ts purely for size. `{{placeholder}}` tokens are rendered by
- * the same substitution pass the Agent tool's description uses, so a
- * user-authored override can interpolate the live agent roster.
+ * Kept out of index.ts purely for size. `{{typeList}}` is replaced at tool
+ * registration with the full live agent roster.
  */
 
 /**

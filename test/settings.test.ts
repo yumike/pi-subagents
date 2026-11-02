@@ -271,20 +271,13 @@ describe("read-only global settings", () => {
       expect(loadSettings().disableDefaultAgents).toBeUndefined();
     });
 
-    it("accepts all valid toolDescriptionMode values", () => {
-      for (const mode of ["full", "compact", "custom"] as const) {
-        writeGlobal({ toolDescriptionMode: mode });
-        expect(loadSettings()).toEqual({ toolDescriptionMode: mode });
-      }
-    });
-
-    it("drops invalid toolDescriptionMode", () => {
-      writeGlobal({ toolDescriptionMode: "tiny" });
-      expect(loadSettings().toolDescriptionMode).toBeUndefined();
-      writeGlobal({ toolDescriptionMode: true });
-      expect(loadSettings().toolDescriptionMode).toBeUndefined();
-      writeGlobal({ toolDescriptionMode: null });
-      expect(loadSettings().toolDescriptionMode).toBeUndefined();
+    it.each(["full", "compact", "custom", "tiny", true, null])("ignores obsolete toolDescriptionMode %j like an unknown key", (mode) => {
+      writeGlobal({ toolDescriptionMode: mode, futureField: 1, graceTurns: 5 });
+      const before = readFileSync(globalFile(), "utf-8");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(loadSettings()).toEqual({ graceTurns: 5 });
+      expect(warn).not.toHaveBeenCalled();
+      expect(readFileSync(globalFile(), "utf-8")).toBe(before);
     });
 
     it("returns {} when the JSON root is not an object (array, string, null)", () => {
@@ -345,7 +338,6 @@ describe("read-only global settings", () => {
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
-        setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
         setRememberAgents: vi.fn(),
@@ -403,7 +395,6 @@ describe("read-only global settings", () => {
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
-      expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
     });
 
     it("applies fallbackSubagent through to the registry", () => {
@@ -434,7 +425,6 @@ describe("read-only global settings", () => {
           schedulingEnabled: false,
           scopeModels: true,
           disableDefaultAgents: true,
-          toolDescriptionMode: "compact",
           fleetView: false,
         },
         appliers,
@@ -447,7 +437,6 @@ describe("read-only global settings", () => {
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
       expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
-      expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
     });
 
@@ -496,9 +485,13 @@ describe("read-only global settings", () => {
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(false);
     });
 
-    it("applies toolDescriptionMode", () => {
-      applySettings({ toolDescriptionMode: "full" }, appliers);
-      expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("full");
+    it("ignores obsolete description mode without applying unrelated fields", () => {
+      const settings = { toolDescriptionMode: "full", graceTurns: 5 };
+      applySettings(settings, appliers);
+      expect(appliers.setGraceTurns).toHaveBeenCalledWith(5);
+      for (const [name, apply] of Object.entries(appliers)) {
+        if (name !== "setGraceTurns") expect(apply).not.toHaveBeenCalled();
+      }
     });
 
     it("applies outputTranscript (both true and false)", () => {
@@ -571,7 +564,6 @@ describe("read-only global settings", () => {
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
-        setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
         setRememberAgents: vi.fn(),

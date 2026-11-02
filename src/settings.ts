@@ -55,8 +55,8 @@ export interface SubagentsSettings {
   backgroundByDefault?: boolean;
   /**
    * Master switch for the schedule subagent feature. Defaults to `true`.
-   * When `false`: the `Agent` tool's `schedule` param + its guideline are
-   * stripped from the tool spec at registration (zero LLM-context cost), the
+   * When `false`: the `Agent` tool's `schedule` param is stripped from the
+   * tool spec at registration (zero LLM-context cost), the
    * scheduler doesn't bind to the session, and the `/agents → Scheduled jobs`
    * menu entry is hidden. Read at extension load (next pi session).
    */
@@ -102,17 +102,6 @@ export interface SubagentsSettings {
    * Defaults to false.
    */
   disableDefaultAgents?: boolean;
-  /**
-   * Which Agent tool description the LLM sees. "full" (default) is the rich
-   * Claude Code-style prompt; "compact" is a ~75% smaller version (one-line
-   * agent type list, terse usage notes) for small/local models where tool-spec
-   * tokens are expensive; "custom" reads `.pi/agent-tool-description.md`
-   * (project, falling back to `<agentDir>/agent-tool-description.md`) with
-   * `{{placeholder}}` substitution — a missing/empty file falls back to "full".
-   * The mode is read once at tool registration — changing it applies on the
-   * next pi session.
-   */
-  toolDescriptionMode?: ToolDescriptionMode;
   /**
    * Whether the Claude Code-style FleetView (the navigable main+subagents list
    * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
@@ -169,9 +158,8 @@ export interface SubagentsSettings {
    * where a note would be noise on every result. What keeps the orchestrator
    * from claiming a `pi-agent-*` branch anyway is that it is never told the
    * capability exists: `isolationParam` (invocation-config.ts) drops the field
-   * from both tool schemas, and `isolationGuideline` (index.ts) drops the
-   * matching prose from the full and compact descriptions — a custom one opts
-   * in via the `{{isolationGuideline}}` placeholder. Anything that
+   * from both tool schemas, and `isolationCompactGuideline` (index.ts) drops
+   * the matching prose from the Agent description. Anything that
    * reintroduces the prose has to reintroduce a note with it.
    *
    * Deliberately a downgrade rather than an error. The fail-loud rule covers
@@ -273,8 +261,6 @@ export interface SubagentsSettings {
   viewerMarkdown?: ViewerMarkdownMode;
 }
 
-export type ToolDescriptionMode = "full" | "compact" | "custom";
-
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
@@ -287,7 +273,6 @@ export interface SettingsAppliers {
   setScopeModels: (enabled: boolean) => void;
   setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
-  setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
   setAgentMentions: (mode: AgentMentionMode) => void;
   setRememberAgents: (b: boolean) => void;
@@ -305,7 +290,6 @@ export interface SettingsAppliers {
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
-const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
 
@@ -376,9 +360,6 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.disableDefaultAgents === "boolean") {
     out.disableDefaultAgents = r.disableDefaultAgents;
-  }
-  if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
-    out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
   }
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
@@ -461,7 +442,6 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
-  if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);
   if (typeof s.rememberAgents === "boolean") appliers.setRememberAgents(s.rememberAgents);

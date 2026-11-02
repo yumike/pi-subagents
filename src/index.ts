@@ -35,7 +35,7 @@ import { setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, loadSettings } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode } from "./types.js";
 import {
@@ -1247,14 +1247,6 @@ export default function (pi: ExtensionAPI) {
     reloadCustomAgents(); // re-register with new setting
   }
 
-  // ---- Agent tool description mode ----
-  // "full" (default) keeps the rich Claude Code-style description; "compact"
-  // swaps in a ~75% smaller one for small/local models (#91). Read once at
-  // tool registration — flipping it applies on the next pi session.
-  let toolDescriptionMode: ToolDescriptionMode = "full";
-  function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
-  function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
-
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -1452,7 +1444,6 @@ export default function (pi: ExtensionAPI) {
       setScopeModels: setScopeModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setDisableDefaultAgents: setDisableDefaultAgents,
-      setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: (b) => fleet.setEnabled(b),
       setAgentMentions: setAgentMentionMode,
       setRememberAgents,
@@ -1470,7 +1461,7 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Agent tool ----
 
-  // Schedule param + its guideline are gated on `schedulingEnabled` (read once
+  // Schedule param is gated on `schedulingEnabled` (read once
   // at registration; flipping the setting later requires next pi session for
   // the schema to update). Defining the shape once and spreading it via Partial
   // preserves Type.Object's inference when present and produces a
@@ -1488,28 +1479,10 @@ export default function (pi: ExtensionAPI) {
   const scheduleParam: Partial<typeof scheduleParamShape> =
     isSchedulingEnabled() ? scheduleParamShape : {};
 
-  const scheduleGuideline = isSchedulingEnabled()
-    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
-    : "";
-
-  // Same trade as scheduleParam/scheduleGuideline above: `isolationParam` drops
-  // the field from the schema when the user set `worktreeIsolation: false`,
-  // so the prose has to go with it. Left in, it would teach the model to pass a
-  // parameter that isn't declared — accepted (TypeBox sets no
-  // `additionalProperties: false`) and then silently dropped by the resolver.
-  // With no per-result note by design, the model would have every reason to go
-  // on reporting a `pi-agent-*` branch that was never created.
-  const isolationGuideline = isWorktreeIsolationEnabled()
-    ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
-    : "";
-
   const isolationCompactGuideline = isWorktreeIsolationEnabled()
     ? `\n- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.`
     : "";
 
-  // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
-  // the same load-bearing facts as the full version at ~75% fewer tokens, for
-  // small/local models. Per-option details live in the param descriptions.
   const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
 ${buildCompactTypeListText()}
 
@@ -1522,104 +1495,13 @@ Notes:
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
-  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
-
-Available agent types and the tools they have access to:
-${buildTypeListText()}
-
-Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
-
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
-
-## When not to use
-
-If the target is already known, use a direct tool — \`read\` for a known path, \`grep\`/\`find\` for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.
-
-## Usage notes
-
-- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
-- When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
-- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
-- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
-- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
-
-## Writing the prompt
-
-Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`;
-
-  // `toolDescriptionMode: "custom"` — user-authored description with live
-  // dynamic parts. Project file wins over global; missing/empty falls back to
-  // "full" (a stale fallback beats a blank tool description). Only the prose
-  // is customizable — the parameter schema stays code-owned.
-  const renderToolDescriptionTemplate = (template: string): string => {
-    const vars: Record<string, () => string> = {
-      typeList: buildTypeListText,
-      compactTypeList: buildCompactTypeListText,
-      agentDir: getAgentDir,
-      isolationGuideline: () => isolationGuideline,
-      scheduleGuideline: () => scheduleGuideline,
-    };
-    // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
-    return template.replace(/\{\{(\w+)\}\}/g, (raw, name: string) => {
-      if (vars[name]) return vars[name]();
-      console.warn(`[pi-subagents] agent-tool-description.md: unknown placeholder ${raw} left as-is`);
-      return raw;
-    });
-  };
-
-  const loadCustomToolDescription = (): string | undefined => {
-    for (const path of [
-      join(process.cwd(), ".pi", "agent-tool-description.md"),
-      join(getAgentDir(), "agent-tool-description.md"),
-    ]) {
-      try {
-        if (!existsSync(path)) continue;
-        const text = readFileSync(path, "utf-8").trim();
-        if (text) return renderToolDescriptionTemplate(text);
-        console.warn(`[pi-subagents] ${path} is empty — ignoring`);
-      } catch (err) {
-        console.warn(`[pi-subagents] failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    return undefined;
-  };
-
-  const agentToolDescription = (() => {
-    const mode = getToolDescriptionMode();
-    if (mode === "compact") return compactAgentToolDescription;
-    if (mode === "custom") {
-      const custom = loadCustomToolDescription();
-      if (custom) return custom;
-      console.warn('[pi-subagents] toolDescriptionMode is "custom" but no agent-tool-description.md found — using "full"');
-    }
-    return fullAgentToolDescription;
-  })();
-
   // Held rather than registered inline: the mention clone reuses this exact
   // definition, so the agent it starts is an ordinary top-level spawn instead
   // of a second implementation that has to be kept in step with this one.
   const agentTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
-    description: agentToolDescription,
+    description: compactAgentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
@@ -2481,7 +2363,7 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
-    description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
+    description: fullWorkflowToolDescription.replace(/\{\{typeList\}\}/g, () => buildTypeListText()),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
       "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
