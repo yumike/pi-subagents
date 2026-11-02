@@ -12,7 +12,8 @@
  * the one part of the fleet with no way to read what they did.
  */
 
-import { writeFileSync } from "node:fs";
+import * as fs from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type AgentSession, type ExtensionAPI, type ExtensionUIContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, OverlayOptions, TuiMode } from "@earendil-works/pi-tui";
@@ -27,6 +28,16 @@ vi.mock("../src/agent-runner.js", async () => {
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return {
+    ...actual,
+    writeFileSync: vi.fn(actual.writeFileSync),
+    mkdirSync: vi.fn(actual.mkdirSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+  };
+});
 
 let sessionMessages: AgentSession["messages"] = [];
 
@@ -55,7 +66,7 @@ interface OpenOverlay {
  * enough to assert on wiring. Here the dialog has to stay up while a second
  * overlay opens on top of it, because that stacking is the thing under test.
  */
-function overlayCtx(mode: TuiMode = "regular") {
+function overlayCtx(mode: TuiMode = "regular", menu = "Workflows") {
   const overlays: OpenOverlay[] = [];
   const hidden: boolean[] = [];
   let entryTaken = false;
@@ -74,7 +85,7 @@ function overlayCtx(mode: TuiMode = "regular") {
       select: vi.fn(async (title: string, options: string[]) => {
         if (title !== "Agents" || entryTaken) return undefined;
         entryTaken = true;
-        return options.find(option => /^Workflows \(\d+\)$/.test(option));
+        return options.find(option => option.startsWith(`${menu} (`));
       }),
       custom: vi.fn(async (factory: (...args: unknown[]) => unknown, options?: OpenOverlay["options"]) => {
         // `terminal` included: the conversation viewer sizes itself off it, so
@@ -221,6 +232,85 @@ describe("the inspector opens a workflow agent's conversation", () => {
     } finally {
       for (const overlay of [...ui.overlays].reverse()) overlay.close();
     }
+  });
+
+  it("shares viewer toggles between fleet and command without writing either settings file", async () => {
+    const globalPath = join(getAgentDir(), "subagents.json");
+    const globalSettings = JSON.stringify({ schedulingEnabled: false, outputTranscript: false, viewerMarkdown: "off" });
+    const projectPath = join(hermetic.dir, ".pi", "subagents.json");
+    const projectSettings = "malformed project config {{{";
+    writeFileSync(globalPath, globalSettings);
+    writeFileSync(projectPath, projectSettings);
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      options.onSessionCreated?.(fakeSession() as unknown as AgentSession);
+      return new Promise(() => {});
+    });
+    const booted = makePi();
+    subagentsExtension(booted.pi);
+    shutdown = () => booted.lifecycle.get("session_shutdown")({}, ctx());
+    const ui = overlayCtx("regular", "Running agents");
+    await booted.lifecycle.get("tool_execution_start")({}, ui.context);
+    await booted.tools.get("Agent").execute("tc-viewer", {
+      prompt: "read", description: "viewer child", subagent_type: "general-purpose", run_in_background: true,
+    }, undefined, undefined, ui.context);
+    await flush();
+    const write = vi.mocked(fs.writeFileSync).mockClear();
+    const mkdir = vi.mocked(fs.mkdirSync).mockClear();
+    const unlink = vi.mocked(fs.unlinkSync).mockClear();
+    try {
+      ui.press("\x1b[B");
+      ui.press("\x1b[B");
+      ui.press("\r");
+      await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
+      const fleetViewer = ui.overlays[0].instance;
+      expect(fleetViewer.render(120).join("\n")).toContain("m raw");
+      fleetViewer.handleInput?.("m");
+      expect(fleetViewer.render(120).join("\n")).toContain("m md");
+      ui.overlays[0].close();
+      await flush();
+
+      const menu = ui.context.ui.select;
+      menu.mockImplementationOnce(async () => "Running agents (1)")
+        .mockImplementationOnce(async (_title: string, options: string[]) => options[0])
+        .mockResolvedValue(undefined);
+      const command = booted.commands.get("agents").handler("", ui.context);
+      await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
+      const commandViewer = ui.overlays[1].instance;
+      expect(commandViewer.render(120).join("\n")).toContain("m md");
+      commandViewer.handleInput?.("m");
+      expect(commandViewer.render(120).join("\n")).toContain("m md+");
+      ui.overlays[1].close();
+      await command;
+
+      ui.press("\r");
+      await vi.waitFor(() => expect(ui.overlays).toHaveLength(3));
+      expect(ui.overlays[2].instance.render(120).join("\n")).toContain("m md+");
+      ui.overlays[2].instance.handleInput?.("m");
+      expect(ui.overlays[2].instance.render(120).join("\n")).toContain("m raw");
+      expect(write).not.toHaveBeenCalled();
+      expect(mkdir).not.toHaveBeenCalled();
+      expect(unlink).not.toHaveBeenCalled();
+      expect(readFileSync(globalPath, "utf-8")).toBe(globalSettings);
+      expect(readFileSync(projectPath, "utf-8")).toBe(projectSettings);
+      expect(booted.pi.events.emit).not.toHaveBeenCalledWith("subagents:settings_changed", expect.anything());
+    } finally {
+      for (const overlay of [...ui.overlays].reverse()) overlay.close();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("has no Settings menu or handler, without creating project configuration", async () => {
+    const booted = makePi();
+    subagentsExtension(booted.pi);
+    shutdown = () => booted.lifecycle.get("session_shutdown")({}, ctx());
+    const select = vi.fn(async () => "Settings");
+    const custom = vi.fn();
+    await booted.commands.get("agents").handler("", ctx({ ui: { select, custom } }));
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(select.mock.calls[0][1]).not.toContain("Settings");
+    expect(select.mock.calls[0][1]).toContain("Create new agent");
+    expect(custom).not.toHaveBeenCalled();
+    expect(existsSync(join(hermetic.dir, ".pi", "subagents.json"))).toBe(false);
   });
 
   it("wires the fleet to the same live settings getter and refreshes it between opens", async () => {

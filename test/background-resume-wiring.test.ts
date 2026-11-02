@@ -59,6 +59,7 @@ function makePi() {
 function makeCtx(cwd: string) {
   return {
     hasUI: false,
+    isIdle: vi.fn(() => true),
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
     cwd,
     model: undefined,
@@ -100,7 +101,7 @@ describe("Agent tool — background resume wiring", () => {
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.HOME = agentDir;
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     mkdirSync(join(agentDir, "agents"), { recursive: true });
     process.chdir(cwd);
 
@@ -285,7 +286,7 @@ describe("Agent tool — background resume wiring", () => {
       { frontmatter: undefined, explicit: 7, stored: 7, expected: 7 },
       { frontmatter: undefined, explicit: undefined, stored: undefined, expected: 23 },
     ])("retains $frontmatter / $explicit through spawn and later resume", async ({ frontmatter, explicit, stored, expected }) => {
-      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+      writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
       const path = join(agentDir, "agents", "actual.md");
       writeFileSync(path, `---\ndescription: Actual\n${frontmatter === undefined ? "" : `max_turns: ${frontmatter}\n`}---\nWork.`);
       const { pi, tools, lifecycle } = makePi();
@@ -332,7 +333,7 @@ describe("Agent tool — background resume wiring", () => {
       { frontmatter: undefined, explicit: undefined, stored: 11, expected: 11 },
       { frontmatter: undefined, explicit: undefined, stored: undefined, expected: undefined },
     ])("actual type precedence: $frontmatter / $explicit / $stored", async ({ frontmatter, explicit, stored, expected }) => {
-      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+      writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
       const actualPath = join(agentDir, "agents", "actual.md");
       writeFileSync(actualPath, "---\ndescription: Actual\n---\nWork.");
       writeFileSync(join(agentDir, "agents", "ignored.md"), `---\ndescription: Ignored\nmax_turns: 97\nrun_in_background: ${!background}\n---\nOther.`);
@@ -366,7 +367,7 @@ describe("Agent tool — background resume wiring", () => {
   });
 
   it.each([undefined, 0, 5])("live mentions reload the actual type and retain its stored budget (%s)", async (frontmatter) => {
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 23 }));
     const path = join(agentDir, "agents", "actual.md");
     writeFileSync(path, "---\ndescription: Actual\n---\nWork.");
     const { pi, tools, lifecycle } = makePi();

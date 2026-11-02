@@ -126,7 +126,7 @@ export function hermeticDir(opts: {
 
   mkdirSync(join(dir, ".pi"), { recursive: true });
   if (opts.settings) {
-    writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify(opts.settings));
+    writeFileSync(join(agentDir, "subagents.json"), JSON.stringify(opts.settings));
   }
   if (opts.agentFiles) {
     mkdirSync(join(dir, ".pi", "agents"), { recursive: true });

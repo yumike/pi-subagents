@@ -27,18 +27,10 @@ import { encodeCwd } from "../../src/output-file.js";
 import { readJournal } from "../../src/workflow/journal.js";
 import { runPrintMode, toolCallsNamed, toolResultsNamed } from "../helpers/print-mode-runner.js";
 
-/**
- * A project directory with workflows switched on.
- *
- * Workflows are opt-in, and the switch is read at extension load — so it has to
- * be on disk before the run boots, exactly as it would be for a real project
- * that turned the feature on once. Without this the tool is never registered
- * and the parent model has nothing to call.
- */
+/** Temporary project for workflow definitions; operational settings are global. */
 function workflowProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "subagents-wf-e2e-"));
   mkdirSync(join(dir, ".pi"), { recursive: true });
-  writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ workflowsEnabled: true }));
   return dir;
 }
 
@@ -98,6 +90,7 @@ describe("Workflow end to end", () => {
     const cwd = workflowProject();
     const run = await runPrintMode({
       prompt: "run the workflow",
+      subagentsSettings: { workflowsEnabled: true },
       cwd,
       maxModelCalls: 32,
       live: false, // scripted on purpose: a real model would not emit the tool call
@@ -182,6 +175,7 @@ describe("Workflow end to end", () => {
     const childPrompts: string[] = [];
     const run = await runPrintMode({
       prompt: "run the saved workflow",
+      subagentsSettings: { workflowsEnabled: true },
       cwd,
       maxModelCalls: 32,
       live: false, // scripted on purpose: a real model would not emit the tool call
@@ -230,6 +224,7 @@ describe("Workflow end to end", () => {
 
     const run = await runPrintMode({
       prompt: "run the broken workflow",
+      subagentsSettings: { workflowsEnabled: true },
       cwd: workflowProject(),
       maxModelCalls: 12,
       live: false, // scripted on purpose: a real model would not emit the tool call
@@ -302,7 +297,7 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  /** A project with workflows on, registered for cleanup. */
+  /** A project registered for cleanup; live runs use the user's global settings. */
   const liveProject = () => {
     const dir = workflowProject();
     dirs.push(dir);

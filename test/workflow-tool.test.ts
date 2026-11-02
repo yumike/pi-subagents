@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
@@ -1474,64 +1474,16 @@ describe("collisions with another extension", () => {
     expect(warnings(context).filter(m => /disabled for this session/.test(m))).toEqual([]);
   });
 
-  /**
-   * Drive `/agents → Settings` far enough to write the settings file.
-   *
-   * Any change writes the WHOLE snapshot, so which row is toggled does not
-   * matter — row 0 is `Max concurrency`, whose single-value list re-applies the
-   * value it already had. What matters is that the file gets written at all.
-   */
-  async function changeAnUnrelatedSetting(booted: ReturnType<typeof boot>) {
-    // The settings list asks for a real theme, which only the TUI normally sets up.
-    initTheme(undefined, false);
-    let built: any;
-    // Take the Settings entry exactly once: the agents menu re-opens after a
-    // submenu closes, so answering it every time never terminates.
-    let taken = false;
-    const context = ctx({
-      cwd: hermetic.dir,
-      ui: {
-        notify: vi.fn(),
-        select: vi.fn(async (title: string, options: string[]) => {
-          if (title !== "Agents" || taken) return undefined;
-          taken = true;
-          return options.find(o => o === "Settings");
-        }),
-        custom: vi.fn(async (factory: any) => {
-          built = factory({ requestRender: () => {} }, {}, {}, () => {});
-          built.handleInput(" ");
-          return undefined;
-        }),
-        input: vi.fn(async () => undefined),
-      },
-    });
-    await booted.commands.get("agents").handler("", context);
-    return context;
-  }
-
-  const savedSettings = () =>
-    JSON.parse(readFileSync(join(hermetic.dir, ".pi", "subagents.json"), "utf-8"));
-
-  it("does not persist a stand-down as an explicit setting", async () => {
-    // The stand-down is scoped to the session that detected it. Writing it to
-    // the file would let an unrelated settings change three menus away freeze
-    // it into an explicit `false` — which then outlives the extension it was
-    // deferring to, leaving workflows mysteriously off after an uninstall.
+  it("keeps a stand-down session-only without modifying settings", async () => {
     const booted = bootAuto();
+    const path = join(getAgentDir(), "subagents.json");
+    const before = readFileSync(path, "utf-8");
     booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
+
     await booted.lifecycle.get("session_start")?.({}, uiContext());
 
-    await changeAnUnrelatedSetting(booted);
-
-    expect(savedSettings()).not.toHaveProperty("workflowsEnabled");
-  });
-
-  it("still persists the setting when the user pinned it", async () => {
-    const booted = boot({ workflowsEnabled: false });
-
-    await changeAnUnrelatedSetting(booted);
-
-    expect(savedSettings().workflowsEnabled).toBe(false);
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    expect(existsSync(join(hermetic.dir, ".pi", "subagents.json"))).toBe(false);
   });
 
   it("ignores tool names that merely contain the word", async () => {

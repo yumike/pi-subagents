@@ -62,7 +62,7 @@ describe("toolDescriptionMode", () => {
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     if (settings) {
-      writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify(settings));
+      writeFileSync(join(hermeticAgentDir, "subagents.json"), JSON.stringify(settings));
     }
     beforeInstantiate?.();
     process.chdir(tmpDir);
@@ -264,7 +264,7 @@ describe("toolDescriptionMode", () => {
     const customDesc: string = tools.get("Agent").description;
 
     // Second instance in the same hermetic cwd, flipped to full mode.
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ toolDescriptionMode: "full" }));
+    writeFileSync(join(hermeticAgentDir, "subagents.json"), JSON.stringify({ toolDescriptionMode: "full" }));
     const second = makePi();
     subagentsExtension(second.pi);
     try {

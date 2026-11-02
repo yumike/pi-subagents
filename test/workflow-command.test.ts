@@ -86,8 +86,7 @@ function commandCtx() {
 describe("/agents → Workflows", () => {
   let hermetic: Hermetic;
 
-  // Workflows are opt-in, so every test that expects the feature to exist has
-  // to turn it on — the same thing a user does once in /agents → Settings.
+  // Pin workflows on through the global setting, regardless of other extensions.
   beforeEach(() => { hermetic = hermeticDir({ settings: { workflowsEnabled: true } }); });
   afterEach(() => { hermetic.restore(); });
 
@@ -116,8 +115,7 @@ describe("/agents → Workflows", () => {
 
     await command.handler("", ui.context);
 
-    // The menu never advertises a switched-off feature; Settings is where it
-    // gets turned on, and that entry is right there.
+    // The menu never advertises a switched-off feature.
     expect(ui.agentsMenu().some(option => WORKFLOWS_ENTRY.test(option))).toBe(false);
   });
 

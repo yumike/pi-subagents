@@ -4,9 +4,8 @@
  * entries to concrete `provider/modelId` keys for scope validation.
  *
  * **Project overrides global**, mirroring pi's own `SettingsManager`
- * deep-merge behavior and matching the precedence we use for our own
- * `subagents.json` settings (see `src/settings.ts:loadSettings`). If
- * project file has `enabledModels` set, it wholly replaces global's
+ * deep-merge behavior. This scope is independent of the extension's global-only
+ * operational settings. A project's `enabledModels` wholly replaces global's
  * (array fields are replaced, not concatenated).
  *
  * **Limited subset of upstream's resolveModelScope.** We support exact
@@ -59,8 +58,7 @@ function readField(path: string): string[] | undefined {
 
 /**
  * Read enabledModels from pi's settings — project-local overrides global.
- * Mirrors pi's SettingsManager deep-merge for the `enabledModels` field
- * (and matches our own loadSettings precedence in src/settings.ts).
+ * Mirrors pi's SettingsManager deep-merge for the `enabledModels` field.
  * Returns undefined when neither file has the field.
  */
 export function readEnabledModels(cwd: string): string[] | undefined {

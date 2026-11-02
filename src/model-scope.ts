@@ -13,7 +13,7 @@ import { isModelInScope, type ModelRegistryRef, readEnabledModels, resolveEnable
  * When enabled, subagent model choices are validated against `enabledModels`
  * from pi's settings — both global `<agentDir>/settings.json` and project-local
  * `<cwd>/.pi/settings.json` (project overrides global). Off by default; opt-in
- * via `/agents → Settings`. See the SubagentsSettings.scopeModels docstring for
+ * via global subagents.json. See the SubagentsSettings.scopeModels docstring for
  * the hard-error vs warn-and-proceed policy and its rationale.
  */
 let scopeModelsEnabled = false;

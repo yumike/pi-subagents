@@ -415,8 +415,8 @@ describe("maxConcurrentForeground", () => {
     expect(runAgent).toHaveBeenCalledTimes(3);
   });
 
-  // The acquire/release pair must agree even though the limit between them is
-  // user-editable at runtime (`/agents → Settings`, and applySettings on load).
+  // The acquire/release pair must agree even if a manager caller changes the
+  // limit through its setter between them.
   // Recomputing the pool at settle time made the release disagree with the
   // acquire in both directions.
   describe("a limit changed mid-run", () => {

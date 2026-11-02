@@ -97,7 +97,7 @@ describe("subagents:rpc:consume", () => {
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     writeFileSync(
-      join(tmpDir, ".pi", "subagents.json"),
+      join(agentDir, "subagents.json"),
       JSON.stringify({ schedulingEnabled: false, outputTranscript: false }),
     );
     process.chdir(tmpDir);

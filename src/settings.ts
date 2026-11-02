@@ -1,9 +1,7 @@
-// Persistence for pi-subagents operational settings.
-// - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — manual defaults, never written here
-// - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load
+// Read-only operational settings from <getAgentDir()>/subagents.json.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode } from "./types.js";
@@ -33,9 +31,7 @@ export interface SubagentsSettings {
    */
   maxConcurrentForeground?: number;
   /**
-   * 0 = unlimited — the extension's single source of truth for that convention:
-   * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
-   * `/agents` → Settings input prompt explicitly says "0 = unlimited".
+   * 0 = unlimited: `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`.
    */
   defaultMaxTurns?: number;
   graceTurns?: number;
@@ -62,8 +58,7 @@ export interface SubagentsSettings {
    * When `false`: the `Agent` tool's `schedule` param + its guideline are
    * stripped from the tool spec at registration (zero LLM-context cost), the
    * scheduler doesn't bind to the session, and the `/agents → Scheduled jobs`
-   * menu entry is hidden. Schema-level removal applies at extension load
-   * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
+   * menu entry is hidden. Read at extension load (next pi session).
    */
   schedulingEnabled?: boolean;
   /**
@@ -153,10 +148,10 @@ export interface SubagentsSettings {
    */
   rememberAgents?: boolean;
   /**
-   * Project/global default for writing each subagent's `.output` transcript
+   * Global default for writing each subagent's `.output` transcript
    * (a JSON-lines copy of the run, stored under the OS temp dir).
    * Defaults to `true`. Set `false` to make transcripts opt-in for the whole
-   * project (e.g. a repo that shouldn't leave run transcripts on disk for backup
+   * session (e.g. runs that shouldn't leave transcripts on disk for backup
    * or DLP tooling to ingest). A custom agent's `output_transcript` frontmatter
    * overrides this per agent. This governs only the transcript — it does NOT
    * affect the persisted pi session (`persist_session`), worktree commits
@@ -201,16 +196,14 @@ export interface SubagentsSettings {
    * ours whatever else is loaded, `false` is off regardless. See
    * `resolveWorkflowCollisions` in index.ts.
    *
-   * Read once at extension init, before registration, so flipping it in
-   * `/agents → Settings` takes effect on the next pi session — the same
-   * contract `schedulingEnabled` has, and for the same reason: a tool spec is
-   * fixed once pi has it.
+   * Read once at extension init, before registration: a tool spec is fixed
+   * once pi has it.
    */
   workflowsEnabled?: boolean;
   /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
-   * disables nesting project-wide. Read when a subagent session is built, so a
+   * disables nesting session-wide. Read when a subagent session is built, so a
    * change applies to agents started after it.
    */
   maxSubagentDepth?: number;
@@ -268,9 +261,8 @@ export interface SubagentsSettings {
   showCost?: boolean;
   /**
    * How much of the conversation viewer's transcript renders as Markdown.
-   * Defaults to `assistant`. Applied live — the viewer's `m` key cycles this
-   * same setting, so a choice made in the overlay persists like one made in
-   * `/agents → Settings`.
+   * Defaults to `assistant`. The viewer's `m` key cycles the mode for the
+   * extension runtime only (until reload/restart); it never changes the file.
    *
    * Scoped rather than all-or-nothing because the two kinds of content have
    * different contracts: assistant text is authored as Markdown, while a tool
@@ -432,14 +424,6 @@ function sanitize(raw: unknown): SubagentsSettings {
   return out;
 }
 
-function globalPath(): string {
-  return join(getAgentDir(), "subagents.json");
-}
-
-function projectPath(cwd: string): string {
-  return join(cwd, ".pi", "subagents.json");
-}
-
 /**
  * Read a settings file. Missing file is silent (returns `{}`). A file that
  * exists but can't be parsed emits a warning to stderr so users aren't
@@ -456,25 +440,9 @@ function readSettingsFile(path: string): SubagentsSettings {
   }
 }
 
-/** Load merged settings: global provides defaults, project overrides. */
-export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
-  return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
-}
-
-/**
- * Write project-local settings. Global is never touched from code.
- * Returns `true` on success, `false` if the write (or mkdir) failed so the
- * caller can surface a warning — persistence isn't fatal but isn't silent.
- */
-export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
-  const path = projectPath(cwd);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(s, null, 2), "utf-8");
-    return true;
-  } catch {
-    return false;
-  }
+/** Load global settings only. Project-local subagents.json files are ignored. */
+export function loadSettings(): SubagentsSettings {
+  return readSettingsFile(join(getAgentDir(), "subagents.json"));
 }
 
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
@@ -506,48 +474,16 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
 }
 
 /**
- * Format the user-facing toast for a settings mutation. Pure function —
- * routes the success/failure of `saveSettings` into the right message + level
- * so the UI layer (index.ts) stays a thin wire between input and notification.
- */
-export function persistToastFor(
-  successMsg: string,
-  persisted: boolean,
-): { message: string; level: "info" | "warning" } {
-  return persisted
-    ? { message: successMsg, level: "info" }
-    : { message: `${successMsg} (session only; failed to persist)`, level: "warning" };
-}
-
-/**
- * Load merged settings, apply them to in-memory state, and emit the
+ * Load global settings, apply them to in-memory state, and emit the
  * `subagents:settings_loaded` lifecycle event. Returns the loaded settings so
  * callers can log/inspect. Extension init wires this once.
  */
 export function applyAndEmitLoaded(
   appliers: SettingsAppliers,
   emit: SettingsEmit,
-  cwd: string = process.cwd(),
 ): SubagentsSettings {
-  const settings = loadSettings(cwd);
+  const settings = loadSettings();
   applySettings(settings, appliers);
   emit("subagents:settings_loaded", { settings });
   return settings;
-}
-
-/**
- * Persist a settings snapshot, emit the `subagents:settings_changed` event
- * (regardless of persist outcome so listeners see the in-memory change), and
- * return the toast the UI should display. Event payload carries the `persisted`
- * flag so listeners can react to write failures.
- */
-export function saveAndEmitChanged(
-  snapshot: SubagentsSettings,
-  successMsg: string,
-  emit: SettingsEmit,
-  cwd: string = process.cwd(),
-): { message: string; level: "info" | "warning" } {
-  const persisted = saveSettings(snapshot, cwd);
-  emit("subagents:settings_changed", { settings: snapshot, persisted });
-  return persistToastFor(successMsg, persisted);
 }
