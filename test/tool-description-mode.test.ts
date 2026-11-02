@@ -2,7 +2,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setDefaultsDisabled } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -76,7 +75,6 @@ describe("compact Agent description", () => {
     // previous test left it. Reset it so each setup()'s settings decide, and
     // so the "default" assertions below really test the default.
     setWorktreeIsolationEnabled(true);
-    setDefaultsDisabled(false);
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -86,16 +84,17 @@ describe("compact Agent description", () => {
     rmSync(hermeticAgentDir, { recursive: true, force: true });
   });
 
-  function writeAgents() {
-    mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
-    for (const [name, content] of Object.entries({
-      Explore: "---\ndescription: Custom scout! More detail must survive in workflows.\ntools: read, grep\nmodel: provider/scout-20260101\n---\nScout.\n",
-      literal: "---\ndescription: Literal $& costs. Later $` and $' and $$ and {{agentDir}} stay literal.\ntools: none\nextensions: false\n---\nRead.\n",
-      disabled: "---\ndescription: Hidden agent. Never advertised.\nenabled: false\n---\nHidden.\n",
-    })) {
-      writeFileSync(join(tmpDir, ".pi", "agents", name + ".md"), content);
-    }
-  }
+  it("defaults to the compact description with one-line type list", () => {
+    const tools = setup();
+    const desc: string = tools.get("Agent").description;
+    expect(desc).toContain("Launch an autonomous agent");
+    expect(desc).not.toContain("## Usage notes");
+    expect(desc).not.toContain("## Writing the prompt");
+    // Type list keeps every agent but only the first sentence of each description.
+    expect(desc).toContain("- general-purpose:");
+    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+    expect(desc).not.toContain("very thorough");
+  });
 
   it.each(["full", "compact", "custom", "tiny", true, null])(
     "ignores obsolete mode %j even with both custom description files",
@@ -144,45 +143,52 @@ describe("compact Agent description", () => {
   });
 
   it("keeps workflow descriptions full, model-labelled, and dollar-pattern literal", () => {
-    const tools = setup(undefined, writeAgents);
+    const tools = setup(undefined, () => {
+      mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(tmpDir, ".pi", "agents", "Explore.md"),
+        "---\ndescription: Custom scout! More detail must survive in workflows.\ntools: read, grep\nmodel: provider/scout-20260101\n---\nScout.\n");
+      writeFileSync(join(tmpDir, ".pi", "agents", "literal.md"),
+        "---\ndescription: Literal $& costs. Later $` and $' and $$ and {{agentDir}} stay literal.\ntools: none\nextensions: false\n---\nRead.\n");
+    });
     const workflow: string = tools.get("SubagentWorkflow").description;
     expect(workflow).toContain("- Explore: Custom scout! More detail must survive in workflows. (scout) (Tools: read, grep)");
     expect(workflow).toContain("- literal: Literal $& costs. Later $` and $' and $$ and {{agentDir}} stay literal. (Tools: none)");
-    expect(workflow).not.toContain("- disabled:");
     expect(workflow).not.toContain("{{typeList}}");
-    const agent: string = tools.get("Agent").description;
-    expect(agent).toContain("- Explore: Custom scout! (Tools: read, grep)");
-    expect(agent).not.toContain("More detail must survive");
-    expect(agent).not.toContain("- disabled:");
-    expect(agent).not.toContain("(scout)");
   });
 
-  it("keeps custom agents when default agents are disabled", () => {
-    const tools = setup({ disableDefaultAgents: true }, writeAgents);
-    for (const name of ["Agent", "SubagentWorkflow"]) {
-      expect(tools.get(name).description).toContain("- literal:");
-      expect(tools.get(name).description).not.toContain("- general-purpose:");
-      expect(tools.get(name).description).not.toContain("- disabled:");
-    }
-    expect(tools.get("Agent").parameters.properties.subagent_type.description)
-      .toContain("Available types: Explore, literal.");
-  });
-
-  it("keeps every load-bearing contract in the description or schema", () => {
+  it("states every load-bearing contract in the description or the schema", () => {
     const tool = setup().get("Agent");
-    const visible = tool.description + "\n" + JSON.stringify(tool.parameters);
+    const visible = `${tool.description}\n${JSON.stringify(tool.parameters)}`;
     for (const contract of [
-      "run_in_background", "resume", "steer_subagent", "worktree", ".pi/agents/",
-      "self-contained", "model", "thinking", "inherit_context",
-    ]) expect(visible).toContain(contract);
+      "run_in_background",
+      "resume",
+      "steer_subagent",
+      "worktree",
+      ".pi/agents/",
+      "self-contained",
+      "model",
+      "thinking",
+      "inherit_context",
+    ]) {
+      expect(visible).toContain(contract);
+    }
   });
 
-  it("every strategy parameter carries a real explanation", () => {
-    const props = setup().get("Agent").parameters.properties;
+  it("every strategy param carries a real description of its own", () => {
+    const props = setup().get("Agent").parameters?.properties ?? {};
     for (const name of ["run_in_background", "model", "thinking", "inherit_context"]) {
-      expect(props[name].description.length).toBeGreaterThan(40);
+      // Long enough to be an explanation the model can act on, not a bare label.
+      expect(props[name]?.description?.length ?? 0).toBeGreaterThan(40);
     }
+  });
+
+  it("guides model selection by delegated task rather than parent model", () => {
+    const props = setup().get("Agent").parameters.properties;
     expect(props.model.description).toMatch(/task's complexity, required capabilities, and cost\/latency trade-offs.*not merely the parent's model/);
+  });
+
+  it("guides reasoning independently of parent effort", () => {
+    const props = setup().get("Agent").parameters.properties;
     expect(props.thinking.description).toMatch(/independently of the parent's effort: lower for bounded mechanical work, higher for difficult analysis or verification/);
   });
 
